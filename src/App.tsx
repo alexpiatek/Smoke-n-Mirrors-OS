@@ -2,6 +2,23 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import './App.css'
+import { ontologySnapshotToUi } from './lib/dashboard/adapters/ontologyToUi'
+import { simulationToUi } from './lib/dashboard/adapters/simulationToUi'
+import { createScenarioEngine, type ScenarioEngine } from './lib/sim/scenarioEngine'
+import { scenarioOptions } from './lib/sim/scenarioDefinitions'
+import type {
+  Detection,
+  FusedTrack,
+  GeoJsonCollection,
+  GeoJsonFeature,
+  OperatorAction,
+  Platform,
+  ProtectedAsset,
+  ProtectedZone,
+  ScenarioBriefing,
+  Sensor,
+} from './lib/types/mission'
+import type { SimulationScenarioKey } from './lib/types/simulation'
 import {
   palantirMissionDetections,
   palantirMissionFusedTracks,
@@ -9,68 +26,6 @@ import {
   palantirMissionOperatorActions,
 } from './data/palantirMissionSnapshot'
 import { palantirPlatforms, palantirSensors, palantirSnapshotMetadata } from './data/palantirSnapshot'
-
-type Platform = {
-  platform_id: string
-  callsign: string
-  platform_type: string
-  owner_unit: string
-  lat: number
-  lon: number
-}
-
-type Sensor = {
-  sensor_id: string
-  platform_id: string
-  modality: string
-  measurement_kind: string
-  range_max_m: number
-  fov_type: string
-  fov_h_deg: number
-  latency_ms_p50: number
-}
-
-type Detection = {
-  detection_id: string
-  sensor_id: string
-  timestamp: string
-  modality: string
-  bearing_deg: number
-  range_m: number
-  confidence: number
-  classification: string
-  contributes_to_track_id: string
-  is_stale?: boolean
-  stale_reason?: string
-  notes?: string
-}
-
-type FusedTrack = {
-  track_id: string
-  mission_area: string
-  custody_status: string
-  confidence: number
-  threat_score: number
-  last_seen: string
-  estimated_lat: number
-  estimated_lon: number
-  source_summary: string
-  recommended_next_action: string
-  explanation: string
-  created_at?: string
-  updated_at?: string
-}
-
-type OperatorAction = {
-  action_id: string
-  track_id: string
-  action_type: string
-  label: string
-  timestamp: string
-  operator_id?: string
-  notes?: string
-  resulting_status?: string
-}
 
 type DemoStep = {
   title: string
@@ -88,22 +43,7 @@ type DemoStep = {
 type DataMode = 'local' | 'palantirSnapshot' | 'palantirMission'
 type EventFilter = 'all' | 'radar' | 'acousticRf' | 'eo' | 'selected'
 type LayerKey = 'sensors' | 'rawDetections' | 'fusedTracks' | 'protectedZones' | 'probablePath' | 'trackHistory'
-
-type GeoJsonGeometry =
-  | { type: 'Point'; coordinates: [number, number] }
-  | { type: 'LineString'; coordinates: [number, number][] }
-  | { type: 'Polygon'; coordinates: [number, number][][] }
-
-type GeoJsonFeature = {
-  type: 'Feature'
-  geometry: GeoJsonGeometry
-  properties: Record<string, string | number | boolean | null>
-}
-
-type GeoJsonCollection = {
-  type: 'FeatureCollection'
-  features: GeoJsonFeature[]
-}
+type SimulationSpeed = 1 | 2 | 5
 
 type MapData = {
   center: [number, number]
@@ -116,6 +56,7 @@ type MapData = {
   probablePath: GeoJsonCollection
   trackHistoryLine: GeoJsonCollection
   trackHistoryPoints: GeoJsonCollection
+  sensorCoverage: GeoJsonCollection
   bearingLines: GeoJsonCollection
   bearingCones: GeoJsonCollection
   platforms: GeoJsonCollection
@@ -128,7 +69,13 @@ type TrackQueueItem = {
   id: string
   kind: 'track' | 'detection'
   label: string
+  priorityRank: number
+  severity: string
   classification: string
+  movementState: MovementState
+  rangeLabel: string
+  bearingLabel: string
+  etaLabel: string
   confidence: number
   threatScore: number
   custodyStatus: string
@@ -142,8 +89,31 @@ type TrackQueueItem = {
   track?: FusedTrack
 }
 
+type MovementState = 'Inbound' | 'Outbound' | 'Loitering' | 'Crossing'
+
+type ThreatSnapshot = {
+  classification: string
+  movementState: MovementState
+  rangeLabel: string
+  bearingLabel: string
+  rangeBearingLabel: string
+  headingLabel: string
+  speedLabel: string
+  etaLabel: string
+  protectedAssetLabel: string
+  recommendedAction: string
+}
+
+type OperatorFeedItem = {
+  id: string
+  timestamp: string
+  title: string
+  detail: string
+  type: string
+}
+
 const dataModeLabels: Record<DataMode, string> = {
-  local: 'Local Ontology Mock',
+  local: 'Local Live Demo Ontology Simulation',
   palantirSnapshot: 'Palantir Ontology Snapshot + Local Fusion Demo',
   palantirMission: 'Palantir Mission Data',
 }
@@ -167,12 +137,15 @@ const layerControls: Array<{ key: LayerKey; label: string }> = [
 
 const defaultLayerState: Record<LayerKey, boolean> = {
   sensors: true,
-  rawDetections: true,
+  rawDetections: false,
   fusedTracks: true,
   protectedZones: true,
   probablePath: true,
-  trackHistory: true,
+  trackHistory: false,
 }
+
+const emptyProtectedAssets: ProtectedAsset[] = []
+const emptyProtectedZones: ProtectedZone[] = []
 
 const localPlatforms: Platform[] = [
   {
@@ -302,9 +275,14 @@ const fusedTracks: FusedTrack[] = [
     estimated_lat: 37.8078,
     estimated_lon: -122.3749,
     source_summary: 'Radar + Acoustic + RF + EO',
-    recommended_next_action: 'Reacquire with EO and keep radar custody.',
+    recommended_next_action: 'Slew EO/IR to projected intercept.',
     explanation:
-      'Four detections agree on a slow small craft moving northeast inside the protected waterfront zone.',
+      'Four detections agree on a low-altitude UAV moving northeast inside the protected waterfront zone.',
+    classification: 'Probable UAV',
+    heading_deg: 58,
+    speed_mps: 15.4,
+    distance_to_asset_m: 1180,
+    eta_seconds_to_asset: 190,
   },
 ]
 
@@ -319,10 +297,10 @@ const initialActions: OperatorAction[] = [
 ]
 
 const actionButtons = [
-  { action_type: 'reacquire', label: 'Slew Camera' },
-  { action_type: 'confirm_track', label: 'Confirm' },
-  { action_type: 'review_open', label: 'Monitor' },
-  { action_type: 'dispatch', label: 'Dispatch' },
+  { action_type: 'slew_eoir', label: 'Slew EO/IR' },
+  { action_type: 'notify_response', label: 'Notify Team' },
+  { action_type: 'monitor', label: 'Monitor' },
+  { action_type: 'reacquire', label: 'Reacquire' },
 ]
 
 const demoSteps: DemoStep[] = [
@@ -511,6 +489,7 @@ const sourceIds = [
   'probable-path-source',
   'track-history-line-source',
   'track-history-points-source',
+  'sensor-coverage-source',
   'bearing-lines-source',
   'bearing-cones-source',
   'platforms-source',
@@ -520,7 +499,16 @@ const sourceIds = [
 ]
 
 const layerGroups: Record<LayerKey, string[]> = {
-  sensors: ['bearing-cones-fill', 'bearing-cones-line', 'bearing-lines', 'platforms', 'sensors', 'sensor-labels'],
+  sensors: [
+    'sensor-coverage-fill',
+    'sensor-coverage-line',
+    'bearing-cones-fill',
+    'bearing-cones-line',
+    'bearing-lines',
+    'platforms',
+    'sensors',
+    'sensor-labels',
+  ],
   rawDetections: ['detections-halo', 'detections'],
   fusedTracks: ['fused-track-ring', 'fused-track-core', 'fused-track-label'],
   protectedZones: [
@@ -530,6 +518,7 @@ const layerGroups: Record<LayerKey, string[]> = {
     'restricted-zone-outline',
     'restricted-zone-hatch',
     'mission-label',
+    'asset-points',
     'asset-labels',
   ],
   probablePath: ['probable-path'],
@@ -581,6 +570,12 @@ function formatTimestamp(timestamp: string) {
   return timestamp.replace('Z', '')
 }
 
+function formatElapsed(seconds: number) {
+  const minutes = Math.floor(seconds / 60)
+  const remainder = Math.floor(seconds % 60)
+  return `T+${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+}
+
 function timestampValue(timestamp: string) {
   const normalized = timestamp.includes('T') ? timestamp : `2026-05-02T${timestamp.replace('Z', '')}.000Z`
   const value = Date.parse(normalized)
@@ -616,14 +611,14 @@ function riskLabel(score: number) {
   return level === 'critical' ? 'Critical' : level === 'high' ? 'High' : level === 'watch' ? 'Watch' : 'Low'
 }
 
-function freshnessLabel(timestamp: string) {
+function freshnessLabel(timestamp: string, referenceTimestamp?: string) {
   const value = timestampValue(timestamp)
 
   if (!value) {
     return formatTimestamp(timestamp)
   }
 
-  const latestReference = Date.parse('2026-05-02T17:43:30.000Z')
+  const latestReference = referenceTimestamp ? timestampValue(referenceTimestamp) : Date.parse('2026-05-02T17:43:30.000Z')
   const deltaSeconds = Math.max(0, Math.round((latestReference - value) / 1000))
 
   if (deltaSeconds < 60) {
@@ -635,6 +630,343 @@ function freshnessLabel(timestamp: string) {
 
 function custodyClass(status: string) {
   return status.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+}
+
+function formatDistanceMeters(distanceM?: number) {
+  if (typeof distanceM !== 'number' || !Number.isFinite(distanceM)) {
+    return 'Unknown'
+  }
+
+  if (distanceM >= 1000) {
+    return `${(distanceM / 1000).toFixed(distanceM >= 10000 ? 0 : 1)} km`
+  }
+
+  return `${Math.round(distanceM)} m`
+}
+
+function formatBearingLabel(bearingDeg?: number) {
+  if (typeof bearingDeg !== 'number' || !Number.isFinite(bearingDeg)) {
+    return 'Unknown'
+  }
+
+  return `${Math.round(((bearingDeg % 360) + 360) % 360).toString().padStart(3, '0')} deg`
+}
+
+function formatHeadingLabel(headingDeg?: number) {
+  return formatBearingLabel(headingDeg)
+}
+
+function formatSpeed(speedMps?: number) {
+  if (typeof speedMps !== 'number' || !Number.isFinite(speedMps)) {
+    return 'Unknown'
+  }
+
+  return `${speedMps.toFixed(speedMps >= 10 ? 1 : 1)} m/s`
+}
+
+function formatEtaSeconds(etaSeconds: number | undefined, movementState: MovementState) {
+  if (movementState === 'Loitering') {
+    return 'loitering'
+  }
+
+  if (typeof etaSeconds !== 'number' || !Number.isFinite(etaSeconds)) {
+    return movementState === 'Inbound' ? 'calculating' : 'no closure'
+  }
+
+  const minutes = Math.floor(etaSeconds / 60)
+  const seconds = Math.max(0, Math.round(etaSeconds % 60))
+
+  if (minutes >= 60) {
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+  }
+
+  return `${minutes}m ${seconds.toString().padStart(2, '0')}s`
+}
+
+function distanceBetweenMeters(a: { lat: number; lon: number }, b: { lat: number; lon: number }) {
+  const radiusM = 6378137
+  const lat1 = (a.lat * Math.PI) / 180
+  const lat2 = (b.lat * Math.PI) / 180
+  const deltaLat = ((b.lat - a.lat) * Math.PI) / 180
+  const deltaLon = ((b.lon - a.lon) * Math.PI) / 180
+  const hav =
+    Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLon / 2) * Math.sin(deltaLon / 2)
+
+  return radiusM * 2 * Math.atan2(Math.sqrt(hav), Math.sqrt(1 - hav))
+}
+
+function bearingBetweenPoints(from: { lat: number; lon: number }, to: { lat: number; lon: number }) {
+  const lat1 = (from.lat * Math.PI) / 180
+  const lat2 = (to.lat * Math.PI) / 180
+  const deltaLon = ((to.lon - from.lon) * Math.PI) / 180
+  const y = Math.sin(deltaLon) * Math.cos(lat2)
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLon)
+
+  return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360
+}
+
+function nearestProtectedAsset(track: FusedTrack, protectedAssets: ProtectedAsset[]) {
+  if (!protectedAssets.length) {
+    return null
+  }
+
+  const trackPoint = { lat: track.estimated_lat, lon: track.estimated_lon }
+
+  return protectedAssets
+    .map((asset) => ({
+      asset,
+      distanceM: distanceBetweenMeters({ lat: asset.lat, lon: asset.lon }, trackPoint),
+      bearingDeg: bearingBetweenPoints({ lat: asset.lat, lon: asset.lon }, trackPoint),
+    }))
+    .sort((a, b) => {
+      const priorityWeight = { critical: 0, high: 1, standard: 2 }
+      return priorityWeight[a.asset.priority] - priorityWeight[b.asset.priority] || a.distanceM - b.distanceM
+    })[0]
+}
+
+function latestTrackDetection(track: FusedTrack, records: Detection[]) {
+  return [...records]
+    .filter((detection) => detection.contributes_to_track_id === track.track_id)
+    .sort((a, b) => timestampValue(b.timestamp) - timestampValue(a.timestamp))[0]
+}
+
+function inferMovementState(track: FusedTrack, protectedAssets: ProtectedAsset[]): MovementState {
+  if ((track.classification ?? '').toLowerCase().includes('loiter') || (track.speed_mps ?? 0) > 0 && (track.speed_mps ?? 0) < 2.2) {
+    return 'Loitering'
+  }
+
+  if (typeof track.eta_seconds_to_asset === 'number' && Number.isFinite(track.eta_seconds_to_asset)) {
+    return 'Inbound'
+  }
+
+  const assetAtRisk = nearestProtectedAsset(track, protectedAssets)
+
+  if (!assetAtRisk || typeof track.heading_deg !== 'number' || typeof track.speed_mps !== 'number') {
+    if ((track.classification ?? '').toLowerCase().includes('outbound')) {
+      return 'Outbound'
+    }
+
+    return 'Crossing'
+  }
+
+  const currentDistance = track.distance_to_asset_m ?? assetAtRisk.distanceM
+  const projected = destinationPoint(track.estimated_lat, track.estimated_lon, track.heading_deg, Math.max(track.speed_mps, 0) * 45)
+  const projectedDistance = distanceBetweenMeters(
+    { lat: assetAtRisk.asset.lat, lon: assetAtRisk.asset.lon },
+    { lat: projected[1], lon: projected[0] },
+  )
+
+  if (projectedDistance < currentDistance - 35) {
+    return 'Inbound'
+  }
+
+  if (projectedDistance > currentDistance + 35) {
+    return 'Outbound'
+  }
+
+  return 'Crossing'
+}
+
+function recommendedActionForTrack(track: FusedTrack, movementState: MovementState, sourceTypes: string[]) {
+  const custody = track.custody_status.toLowerCase()
+  const hasVisual = sourceTypes.some((source) => modalityGroup(source) === 'EO' || source.toUpperCase().includes('IR'))
+
+  if (custody.includes('lost') || custody.includes('reacquiring') || custody.includes('eo lost')) {
+    return 'Reacquire track'
+  }
+
+  if (movementState === 'Inbound' && !hasVisual) {
+    return 'Slew EO/IR to projected intercept'
+  }
+
+  if (track.threat_score >= 70) {
+    return 'Notify response team'
+  }
+
+  if (track.threat_score < 35) {
+    return 'Continue monitor'
+  }
+
+  return track.recommended_next_action.replace(/\.$/, '')
+}
+
+function buildThreatSnapshot(track: FusedTrack, records: Detection[], protectedAssets: ProtectedAsset[]): ThreatSnapshot {
+  const latestDetection = latestTrackDetection(track, records)
+  const assetAtRisk = nearestProtectedAsset(track, protectedAssets)
+  const movementState = inferMovementState(track, protectedAssets)
+  const rangeM = assetAtRisk ? track.distance_to_asset_m ?? assetAtRisk.distanceM : latestDetection?.range_m
+  const bearingDeg = assetAtRisk ? assetAtRisk.bearingDeg : latestDetection?.bearing_deg
+  const sourceTypes = sourceTokens(track.source_summary)
+
+  return {
+    classification: track.classification ?? latestDetection?.classification ?? 'Fused contact',
+    movementState,
+    rangeLabel: formatDistanceMeters(rangeM),
+    bearingLabel: formatBearingLabel(bearingDeg),
+    rangeBearingLabel: `${formatDistanceMeters(rangeM)} / ${formatBearingLabel(bearingDeg)}`,
+    headingLabel: formatHeadingLabel(track.heading_deg ?? latestDetection?.bearing_deg),
+    speedLabel: formatSpeed(track.speed_mps),
+    etaLabel: formatEtaSeconds(track.eta_seconds_to_asset, movementState),
+    protectedAssetLabel: assetAtRisk?.asset.label ?? track.mission_area.replace('MissionArea-', '').replace(/-/g, ' '),
+    recommendedAction: recommendedActionForTrack(track, movementState, sourceTypes),
+  }
+}
+
+function strongestDetectionConfidence(records: Detection[], groups: string[]) {
+  const matching = records.filter((detection) => groups.includes(modalityGroup(detection.modality)))
+
+  if (!matching.length) {
+    return undefined
+  }
+
+  return Math.max(...matching.map((detection) => detection.confidence))
+}
+
+function explainabilityRows(track: FusedTrack, records: Detection[]) {
+  const relatedDetections = records.filter((detection) => detection.contributes_to_track_id === track.track_id)
+  const contributionByGroup = new Map<string, { confidence: number; status: string }>()
+
+  track.fusion_contributions?.forEach((contribution) => {
+    const group = modalityGroup(contribution.modality)
+    const current = contributionByGroup.get(group)
+
+    if (!current || contribution.confidence > current.confidence) {
+      contributionByGroup.set(group, {
+        confidence: contribution.confidence,
+        status: contributionStatusLabel(contribution.status),
+      })
+    }
+  })
+
+  const radarConfidence = contributionByGroup.get('Radar')?.confidence ?? strongestDetectionConfidence(relatedDetections, ['Radar'])
+  const passiveConfidence = contributionByGroup.get('Acoustic/RF')?.confidence ?? strongestDetectionConfidence(relatedDetections, ['Acoustic/RF'])
+  const visualConfidence = contributionByGroup.get('EO')?.confidence ?? strongestDetectionConfidence(relatedDetections, ['EO'])
+  const currentGroups = new Set(relatedDetections.filter((detection) => !detection.is_stale).map((detection) => modalityGroup(detection.modality)))
+  const timingAgreement = currentGroups.size >= 2 || track.confidence >= 0.72
+
+  return [
+    {
+      label: 'Radar detection',
+      status: radarConfidence ? contributionByGroup.get('Radar')?.status ?? 'Detected' : 'No current cue',
+      confidence: radarConfidence,
+      active: Boolean(radarConfidence),
+    },
+    {
+      label: 'RF/acoustic correlation',
+      status: passiveConfidence ? contributionByGroup.get('Acoustic/RF')?.status ?? 'Correlated' : 'No current cue',
+      confidence: passiveConfidence,
+      active: Boolean(passiveConfidence),
+    },
+    {
+      label: 'EO/IR visual confirmation',
+      status: visualConfidence ? contributionByGroup.get('EO')?.status ?? 'Visual' : 'Pending visual',
+      confidence: visualConfidence,
+      active: Boolean(visualConfidence),
+    },
+    {
+      label: 'Timing/bearing agreement',
+      status: timingAgreement ? 'Aligned' : 'Weak agreement',
+      confidence: timingAgreement ? track.confidence : undefined,
+      active: timingAgreement,
+    },
+  ]
+}
+
+function decisionFeedItems({
+  actions,
+  latestDetection,
+  selectedTrack,
+  snapshot,
+}: {
+  actions: OperatorAction[]
+  latestDetection?: Detection
+  selectedTrack: FusedTrack
+  snapshot: ThreatSnapshot
+}) {
+  const decisionActionTypes = new Set([
+    'threat_increased',
+    'custody_changed',
+    'reacquired',
+    'entered_protected_zone',
+    'confidence_increased',
+    'recommended_action_updated',
+    'response_dispatched',
+    'dispatch',
+    'notify_response',
+    'slew_eoir',
+    'reacquire',
+    'sensor_drop',
+    'eo_camera_tasked',
+    'task_eo',
+  ])
+  const feed: OperatorFeedItem[] = actions
+    .filter((action) => action.track_id === selectedTrack.track_id && decisionActionTypes.has(action.action_type))
+    .map((action) => ({
+      id: action.action_id,
+      timestamp: action.timestamp,
+      title: action.label,
+      detail: action.resulting_status ?? action.notes ?? action.action_type.replace(/_/g, ' '),
+      type: action.action_type,
+    }))
+
+  if (selectedTrack.threat_score >= 70) {
+    feed.push({
+      id: `${selectedTrack.track_id}-high-threat`,
+      timestamp: selectedTrack.last_seen,
+      title: 'New high threat',
+      detail: `${selectedTrack.track_id} ranked ${riskLabel(selectedTrack.threat_score)} near ${snapshot.protectedAssetLabel}`,
+      type: 'threat_increased',
+    })
+  }
+
+  if (selectedTrack.custody_status === 'Lost' || selectedTrack.custody_status === 'Reacquiring') {
+    feed.push({
+      id: `${selectedTrack.track_id}-custody`,
+      timestamp: selectedTrack.last_seen,
+      title: 'Custody lost',
+      detail: `${selectedTrack.custody_status}; ${snapshot.recommendedAction}`,
+      type: 'custody_changed',
+    })
+  }
+
+  if (selectedTrack.confidence >= 0.75) {
+    feed.push({
+      id: `${selectedTrack.track_id}-confidence`,
+      timestamp: latestDetection?.timestamp ?? selectedTrack.last_seen,
+      title: 'Confidence crossed threshold',
+      detail: `${formatConfidence(selectedTrack.confidence)} from ${selectedTrack.source_summary}`,
+      type: 'confidence_increased',
+    })
+  }
+
+  feed.push({
+    id: `${selectedTrack.track_id}-recommendation`,
+    timestamp: selectedTrack.updated_at ?? selectedTrack.last_seen,
+    title: 'Recommended action changed',
+    detail: snapshot.recommendedAction,
+    type: 'recommended_action_updated',
+  })
+
+  return feed
+    .sort((a, b) => timestampValue(b.timestamp) - timestampValue(a.timestamp))
+    .filter((item, index, items) => items.findIndex((candidate) => candidate.id === item.id) === index)
+    .slice(0, 6)
+}
+
+function contributionStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    pending: 'Pending',
+    tentative: 'Tentative',
+    correlated: 'Correlated',
+    confirmed: 'Confirmed',
+    visual: 'Visual',
+    stale: 'Stale',
+    lost: 'Lost',
+    reacquiring: 'Reacquiring',
+  }
+
+  return labels[status] ?? status
 }
 
 function getDetectionStatus(demoStep: DemoStep | null, detection: Detection, selectedDetectionId: string | null) {
@@ -650,6 +982,10 @@ function getDetectionStatus(demoStep: DemoStep | null, detection: Detection, sel
     return 'Active'
   }
 
+  if (!demoStep) {
+    return 'Active'
+  }
+
   return 'Supporting'
 }
 
@@ -658,6 +994,10 @@ function isDetectionStale(demoStep: DemoStep | null, detection: Detection) {
 }
 
 function isDetectionActive(demoStep: DemoStep | null, detection: Detection) {
+  if (!demoStep) {
+    return !detection.is_stale
+  }
+
   return Boolean(demoStep?.activeDetectionIds.includes(detection.detection_id))
 }
 
@@ -701,6 +1041,16 @@ function buildSector(lat: number, lon: number, bearingDeg: number, distanceM: nu
   return coordinates
 }
 
+function buildCircle(lat: number, lon: number, radiusM: number, steps = 64) {
+  const coordinates: [number, number][] = []
+
+  for (let index = 0; index <= steps; index += 1) {
+    coordinates.push(destinationPoint(lat, lon, (index / steps) * 360, radiusM))
+  }
+
+  return coordinates
+}
+
 function uniqueById<T>(records: T[], getId: (record: T) => string) {
   const seen = new Set<string>()
 
@@ -731,6 +1081,11 @@ function buildDetectionCoordinates(track: FusedTrack, records: Detection[]) {
   const coordinates = new Map<string, [number, number]>()
 
   sortedRecords.forEach((detection, index) => {
+    if (typeof detection.estimated_lat === 'number' && typeof detection.estimated_lon === 'number') {
+      coordinates.set(detection.detection_id, [detection.estimated_lon, detection.estimated_lat])
+      return
+    }
+
     const alongTrack = destinationPoint(start[1], start[0], 55, stepDistance * index)
     const lateralOffset = ((index % 3) - 1) * 44 + (modalityGroup(detection.modality) === 'Radar' ? -18 : 18)
     const point = destinationPoint(alongTrack[1], alongTrack[0], 145, lateralOffset)
@@ -740,12 +1095,62 @@ function buildDetectionCoordinates(track: FusedTrack, records: Detection[]) {
   return coordinates
 }
 
+function closePolygon(coordinates: [number, number][]) {
+  const first = coordinates[0]
+  const last = coordinates[coordinates.length - 1]
+
+  if (!first || !last) {
+    return coordinates
+  }
+
+  if (first[0] === last[0] && first[1] === last[1]) {
+    return coordinates
+  }
+
+  return [...coordinates, first]
+}
+
+function polygonBounds(coordinates: [number, number][]) {
+  return coordinates.reduce(
+    (bounds, coordinate) => ({
+      minLon: Math.min(bounds.minLon, coordinate[0]),
+      maxLon: Math.max(bounds.maxLon, coordinate[0]),
+      minLat: Math.min(bounds.minLat, coordinate[1]),
+      maxLat: Math.max(bounds.maxLat, coordinate[1]),
+    }),
+    {
+      minLon: coordinates[0]?.[0] ?? 0,
+      maxLon: coordinates[0]?.[0] ?? 0,
+      minLat: coordinates[0]?.[1] ?? 0,
+      maxLat: coordinates[0]?.[1] ?? 0,
+    },
+  )
+}
+
+function polygonLabelPoint(coordinates: [number, number][]): [number, number] {
+  const bounds = polygonBounds(coordinates)
+  return [(bounds.minLon + bounds.maxLon) / 2, (bounds.minLat + bounds.maxLat) / 2]
+}
+
+function isRecentlySeen(timestamp: string, referenceTimestamp: string, seconds: number) {
+  const referenceValue = timestampValue(referenceTimestamp)
+  const timestampMs = timestampValue(timestamp)
+
+  if (!referenceValue || !timestampMs) {
+    return true
+  }
+
+  return referenceValue - timestampMs <= seconds * 1000
+}
+
 function buildMapData({
   activePlatforms,
   activeSensors,
   allTracks,
   detections: records,
   demoStep,
+  protectedAssets = [],
+  protectedZones = [],
   selectedDetectionId,
   selectedTrack,
 }: {
@@ -754,10 +1159,17 @@ function buildMapData({
   allTracks: FusedTrack[]
   detections: Detection[]
   demoStep: DemoStep | null
+  protectedAssets?: ProtectedAsset[]
+  protectedZones?: ProtectedZone[]
   selectedDetectionId: string | null
   selectedTrack: FusedTrack
 }): MapData {
-  const relatedSensorIds = new Set(records.map((detection) => detection.sensor_id))
+  const selectedTrackRecords = records.filter((detection) => detection.contributes_to_track_id === selectedTrack.track_id)
+  const selectedSensorIds = new Set([
+    ...selectedTrackRecords.map((detection) => detection.sensor_id),
+    ...(selectedTrack.fusion_contributions?.map((contribution) => contribution.sensor_id) ?? []),
+  ])
+  const relatedSensorIds = new Set([...records.map((detection) => detection.sensor_id), ...selectedSensorIds])
   const displaySensors = uniqueById(
     [
       ...activeSensors,
@@ -777,38 +1189,63 @@ function buildMapData({
   )
   const detectionCoordinates = buildDetectionCoordinates(selectedTrack, records)
   const selectedDetection = records.find((detection) => detection.detection_id === selectedDetectionId)
-  const zoneCoordinates: [number, number][] = [
-    offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, -1600, -980),
-    offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 1750, -780),
-    offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 2150, 940),
-    offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, -1350, 1180),
-    offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, -1600, -980),
-  ]
-  const sortedCoordinates = [...records]
+  const latestTimestamp =
+    [...records.map((detection) => detection.timestamp), selectedTrack.last_seen].sort((a, b) => timestampValue(b) - timestampValue(a))[0] ??
+    selectedTrack.last_seen
+  const trackCoordinate: [number, number] = [selectedTrack.estimated_lon, selectedTrack.estimated_lat]
+  const contributionStatusBySensor = new Map(
+    selectedTrack.fusion_contributions?.map((contribution) => [contribution.sensor_id, contribution.status]) ?? [],
+  )
+  const missionZoneRecord = protectedZones.find((zone) => zone.kind === 'mission')
+  const restrictedZoneRecord = protectedZones.find((zone) => zone.kind === 'restricted') ?? protectedZones.find((zone) => zone.kind === 'asset_buffer')
+  const zoneCoordinates: [number, number][] = missionZoneRecord
+    ? closePolygon(missionZoneRecord.coordinates.map((coordinate) => [coordinate.lon, coordinate.lat]))
+    : [
+        offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, -1600, -980),
+        offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 1750, -780),
+        offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 2150, 940),
+        offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, -1350, 1180),
+        offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, -1600, -980),
+      ]
+  const detectionHistoryCoordinates = selectedTrackRecords
     .sort((a, b) => timestampValue(a.timestamp) - timestampValue(b.timestamp))
     .map((detection) => detectionCoordinates.get(detection.detection_id))
     .filter((coordinate): coordinate is [number, number] => Boolean(coordinate))
-  const trackCoordinate: [number, number] = [selectedTrack.estimated_lon, selectedTrack.estimated_lat]
+  const trackHistoryCoordinates =
+    selectedTrack.track_history?.map((point) => [point.lon, point.lat] as [number, number]).filter(Boolean) ?? []
+  const sortedCoordinates = trackHistoryCoordinates.length > 0 ? trackHistoryCoordinates : detectionHistoryCoordinates
   const historyCoordinates = [...sortedCoordinates, trackCoordinate]
-  const probablePathCoordinates = [
-    sortedCoordinates[0] ?? destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 235, 700),
-    trackCoordinate,
-    destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 55, 920),
-  ]
-  const restrictedZoneCoordinates: [number, number][] = [
-    destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 42, 410),
-    destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 72, 890),
-    destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 118, 760),
-    destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 163, 360),
-    destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 42, 410),
-  ]
-  const restrictedHatchFeatures: GeoJsonFeature[] = [0, 1, 2, 3].map((index) => ({
+  const probablePathCoordinates =
+    selectedTrack.probable_path && selectedTrack.probable_path.length > 0
+      ? [trackCoordinate, ...selectedTrack.probable_path.map((point) => [point.lon, point.lat] as [number, number])]
+      : [
+          sortedCoordinates[0] ?? destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 235, 700),
+          trackCoordinate,
+          destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, selectedTrack.heading_deg ?? 55, 920),
+        ]
+  const restrictedZoneCoordinates: [number, number][] = restrictedZoneRecord
+    ? closePolygon(restrictedZoneRecord.coordinates.map((coordinate) => [coordinate.lon, coordinate.lat]))
+    : [
+        destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 42, 410),
+        destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 72, 890),
+        destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 118, 760),
+        destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 163, 360),
+        destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 42, 410),
+      ]
+  const restrictedBounds = polygonBounds(restrictedZoneCoordinates)
+  const restrictedHatchFeatures: GeoJsonFeature[] = [0, 1, 2, 3, 4].map((index) => ({
     type: 'Feature',
     geometry: {
       type: 'LineString',
       coordinates: [
-        destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 42 + index * 26, 380 + index * 52),
-        destinationPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 146 + index * 10, 760 + index * 42),
+        [
+          restrictedBounds.minLon + (restrictedBounds.maxLon - restrictedBounds.minLon) * (index / 5),
+          restrictedBounds.minLat,
+        ],
+        [
+          restrictedBounds.minLon + (restrictedBounds.maxLon - restrictedBounds.minLon) * ((index + 1) / 5),
+          restrictedBounds.maxLat,
+        ],
       ],
     },
     properties: {
@@ -823,9 +1260,9 @@ function buildMapData({
         type: 'Feature',
         geometry: { type: 'Polygon', coordinates: [zoneCoordinates] },
         properties: {
-          id: selectedTrack.mission_area,
-          label: selectedTrack.mission_area,
-          tooltip: `${selectedTrack.mission_area} protected zone`,
+          id: missionZoneRecord?.zone_id ?? selectedTrack.mission_area,
+          label: missionZoneRecord?.label ?? selectedTrack.mission_area,
+          tooltip: `${missionZoneRecord?.label ?? selectedTrack.mission_area} protected zone`,
         },
       },
     ],
@@ -835,9 +1272,9 @@ function buildMapData({
     features: [
       {
         type: 'Feature',
-        geometry: { type: 'Point', coordinates: offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, -1160, 1110) },
+        geometry: { type: 'Point', coordinates: polygonLabelPoint(zoneCoordinates) },
         properties: {
-          label: selectedTrack.mission_area,
+          label: missionZoneRecord?.label ?? selectedTrack.mission_area,
         },
       },
     ],
@@ -849,32 +1286,50 @@ function buildMapData({
         type: 'Feature',
         geometry: { type: 'Polygon', coordinates: [restrictedZoneCoordinates] },
         properties: {
-          id: `${selectedTrack.track_id}-threat-zone`,
-          label: 'Restricted Review Zone',
-          tooltip: `Threat zone projected from ${selectedTrack.track_id}`,
+          id: restrictedZoneRecord?.zone_id ?? `${selectedTrack.track_id}-threat-zone`,
+          label: restrictedZoneRecord?.label ?? 'Restricted Review Zone',
+          tooltip: restrictedZoneRecord?.label ?? `Threat zone projected from ${selectedTrack.track_id}`,
         },
       },
     ],
   }
   const assetLabels: GeoJsonCollection = {
     type: 'FeatureCollection',
-    features: [
-      {
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, -520, -620) },
-        properties: {
-          label: 'Protected Waterfront',
-        },
-      },
-      {
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 940, 360) },
-        properties: {
-          label: 'Probable Intercept',
-        },
-      },
-    ],
+    features:
+      protectedAssets.length > 0
+        ? protectedAssets.map((asset) => ({
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [asset.lon, asset.lat] },
+            properties: {
+              label: asset.label,
+              priority: asset.priority,
+            },
+          }))
+        : [
+            {
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, -520, -620) },
+              properties: {
+                label: 'Protected Waterfront',
+                priority: 'critical',
+              },
+            },
+            {
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: offsetMeters(selectedTrack.estimated_lat, selectedTrack.estimated_lon, 940, 360) },
+              properties: {
+                label: 'Probable Intercept',
+                priority: 'high',
+              },
+            },
+          ],
   }
+  const mapCenter =
+    protectedAssets[0]
+      ? ([protectedAssets[0].lon, protectedAssets[0].lat] as [number, number])
+      : missionZoneRecord
+        ? polygonLabelPoint(zoneCoordinates)
+        : trackCoordinate
   const probablePath: GeoJsonCollection = {
     type: 'FeatureCollection',
     features: [
@@ -930,8 +1385,10 @@ function buildMapData({
         modalityGroup: modalityGroup(detection.modality),
         status,
         selected: detection.detection_id === selectedDetectionId,
+        trackSelected: detection.contributes_to_track_id === selectedTrack.track_id,
         active: isDetectionActive(demoStep, detection),
         stale: isDetectionStale(demoStep, detection),
+        contributionStatus: contributionStatusBySensor.get(detection.sensor_id) ?? status.toLowerCase(),
         confidence: detection.confidence,
         tooltip: `${detection.detection_id} | ${modalityShortLabel(detection.modality)} | ${detection.classification} | ${formatConfidence(
           detection.confidence,
@@ -948,17 +1405,22 @@ function buildMapData({
       selected: selectedDetection
         ? getSensor(selectedDetection.sensor_id, displaySensors)?.platform_id === platform.platform_id
         : false,
+      relevant: displaySensors.some((sensor) => sensor.platform_id === platform.platform_id && selectedSensorIds.has(sensor.sensor_id)),
       tooltip: `${platform.callsign} | ${platform.platform_type} | ${platform.platform_id}`,
     },
   }))
-  const sensorFeatures: GeoJsonFeature[] = displaySensors.flatMap((sensor, index) => {
+  const sensorFeatures: GeoJsonFeature[] = displaySensors.flatMap((sensor) => {
       const platform = getPlatform(sensor.platform_id, displayPlatforms)
 
       if (!platform) {
         return []
       }
 
-      const offset = destinationPoint(platform.lat, platform.lon, 45 + (index % 6) * 48, 58 + (index % 3) * 34)
+      const colocatedSensorIndex = displaySensors.filter((candidate) => candidate.platform_id === sensor.platform_id).findIndex((candidate) => candidate.sensor_id === sensor.sensor_id)
+      const offset =
+        colocatedSensorIndex <= 0
+          ? ([platform.lon, platform.lat] as [number, number])
+          : destinationPoint(platform.lat, platform.lon, 45 + (colocatedSensorIndex % 6) * 58, 42)
 
       const feature: GeoJsonFeature = {
         type: 'Feature',
@@ -969,13 +1431,56 @@ function buildMapData({
           modality: modalityShortLabel(sensor.modality),
           modalityGroup: modalityGroup(sensor.modality),
           selected: selectedDetection?.sensor_id === sensor.sensor_id,
+          relevant: selectedSensorIds.has(sensor.sensor_id),
           tooltip: `${sensor.sensor_id} | ${modalityShortLabel(sensor.modality)} | ${sensor.measurement_kind}`,
         },
       }
 
       return [feature]
     })
-  const bearingLineFeatures: GeoJsonFeature[] = records.flatMap((detection) => {
+  const sensorCoverageFeatures: GeoJsonFeature[] = displaySensors.flatMap((sensor) => {
+    const platform = getPlatform(sensor.platform_id, displayPlatforms)
+
+    if (!platform) {
+      return []
+    }
+
+    const normalizedModality = normalizeModality(sensor.modality)
+    const maxRange = sensor.range_max_m > 0 ? sensor.range_max_m : normalizedModality.includes('RF') ? 3200 : 1800
+    const coverageRange =
+      normalizedModality.includes('RADAR') ? Math.min(maxRange, 5600) : normalizedModality.includes('RF') ? Math.min(maxRange, 3600) : Math.min(maxRange, 2400)
+
+    if (coverageRange < 250) {
+      return []
+    }
+
+    return [
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [buildCircle(platform.lat, platform.lon, coverageRange)],
+        },
+        properties: {
+          id: `${sensor.sensor_id}-coverage`,
+          sensorId: sensor.sensor_id,
+          modalityGroup: modalityGroup(sensor.modality),
+          label: `${modalityShortLabel(sensor.modality)} coverage`,
+          relevant: selectedSensorIds.has(sensor.sensor_id),
+          tooltip: `${sensor.sensor_id} fixed coverage / ${Math.round(coverageRange)} m`,
+        },
+      },
+    ]
+  })
+  const detailRecords = records.filter(
+    (detection) =>
+      detection.detection_id === selectedDetectionId ||
+      (detection.contributes_to_track_id === selectedTrack.track_id &&
+        !isDetectionStale(demoStep, detection) &&
+        isRecentlySeen(detection.timestamp, latestTimestamp, 42)) ||
+      (!isDetectionStale(demoStep, detection) && isRecentlySeen(detection.timestamp, latestTimestamp, 12) && detection.confidence >= 0.62),
+  )
+  const bearingLineFeatures: GeoJsonFeature[] = detailRecords.flatMap((detection) => {
       const sensor = getSensor(detection.sensor_id, displaySensors)
       const platform = sensor ? getPlatform(sensor.platform_id, displayPlatforms) : null
       const detectionCoordinate = detectionCoordinates.get(detection.detection_id)
@@ -991,14 +1496,17 @@ function buildMapData({
           id: `${detection.detection_id}-bearing`,
           modalityGroup: modalityGroup(detection.modality),
           selected: detection.detection_id === selectedDetectionId,
+          trackSelected: detection.contributes_to_track_id === selectedTrack.track_id,
           active: isDetectionActive(demoStep, detection),
+          stale: isDetectionStale(demoStep, detection),
+          contributionStatus: contributionStatusBySensor.get(detection.sensor_id) ?? 'supporting',
           tooltip: `${detection.sensor_id} bearing to ${detection.detection_id}`,
         },
       }
 
       return [feature]
     })
-  const bearingConeFeatures: GeoJsonFeature[] = records
+  const bearingConeFeatures: GeoJsonFeature[] = detailRecords
     .filter((detection) => ['Acoustic/RF', 'EO'].includes(modalityGroup(detection.modality)))
     .flatMap((detection) => {
       const sensor = getSensor(detection.sensor_id, displaySensors)
@@ -1020,6 +1528,10 @@ function buildMapData({
           id: `${detection.detection_id}-cone`,
           modalityGroup: modalityGroup(detection.modality),
           selected: detection.detection_id === selectedDetectionId,
+          trackSelected: detection.contributes_to_track_id === selectedTrack.track_id,
+          active: isDetectionActive(demoStep, detection),
+          stale: isDetectionStale(demoStep, detection),
+          contributionStatus: contributionStatusBySensor.get(detection.sensor_id) ?? 'supporting',
         },
       }
 
@@ -1027,8 +1539,8 @@ function buildMapData({
     })
 
   return {
-    center: trackCoordinate,
-    zoom: activePlatforms.length > 3 ? 10.6 : 12.8,
+    center: mapCenter,
+    zoom: protectedAssets.length > 0 ? 12.9 : activePlatforms.length > 3 ? 10.6 : 12.8,
     missionZone,
     missionLabel,
     restrictedZone,
@@ -1037,6 +1549,7 @@ function buildMapData({
     probablePath,
     trackHistoryLine,
     trackHistoryPoints,
+    sensorCoverage: { type: 'FeatureCollection', features: sensorCoverageFeatures },
     bearingLines: { type: 'FeatureCollection', features: bearingLineFeatures },
     bearingCones: { type: 'FeatureCollection', features: bearingConeFeatures },
     platforms: { type: 'FeatureCollection', features: platformFeatures },
@@ -1157,6 +1670,27 @@ function addMapLayers(map: maplibregl.Map) {
     },
   })
   map.addLayer({
+    id: 'asset-points',
+    type: 'circle',
+    source: 'asset-labels-source',
+    paint: {
+      'circle-radius': [
+        'match',
+        ['get', 'priority'],
+        'critical',
+        8,
+        'high',
+        6.5,
+        5.5,
+      ],
+      'circle-color': '#d7f4ff',
+      'circle-opacity': 0.92,
+      'circle-stroke-color': '#2aa7d8',
+      'circle-stroke-opacity': 0.9,
+      'circle-stroke-width': 2,
+    },
+  })
+  map.addLayer({
     id: 'asset-labels',
     type: 'symbol',
     source: 'asset-labels-source',
@@ -1210,6 +1744,76 @@ function addMapLayers(map: maplibregl.Map) {
     },
   })
   map.addLayer({
+    id: 'sensor-coverage-fill',
+    type: 'fill',
+    source: 'sensor-coverage-source',
+    paint: {
+      'fill-color': [
+        'match',
+        ['get', 'modalityGroup'],
+        'Radar',
+        '#36d8ef',
+        'Acoustic/RF',
+        '#f1b84b',
+        'EO',
+        '#67e8a3',
+        '#7ac6cb',
+      ],
+      'fill-opacity': [
+        'case',
+        ['boolean', ['get', 'relevant'], false],
+        [
+          'match',
+          ['get', 'modalityGroup'],
+          'Radar',
+          0.026,
+          'Acoustic/RF',
+          0.02,
+          'EO',
+          0.018,
+          0.014,
+        ],
+        0.004,
+      ],
+    },
+  })
+  map.addLayer({
+    id: 'sensor-coverage-line',
+    type: 'line',
+    source: 'sensor-coverage-source',
+    paint: {
+      'line-color': [
+        'match',
+        ['get', 'modalityGroup'],
+        'Radar',
+        '#36d8ef',
+        'Acoustic/RF',
+        '#f1b84b',
+        'EO',
+        '#67e8a3',
+        '#7ac6cb',
+      ],
+      'line-opacity': [
+        'case',
+        ['boolean', ['get', 'relevant'], false],
+        [
+          'match',
+          ['get', 'modalityGroup'],
+          'Radar',
+          0.28,
+          'Acoustic/RF',
+          0.2,
+          'EO',
+          0.18,
+          0.14,
+        ],
+        0.035,
+      ],
+      'line-width': 1,
+      'line-dasharray': [2, 3],
+    },
+  })
+  map.addLayer({
     id: 'bearing-cones-fill',
     type: 'fill',
     source: 'bearing-cones-source',
@@ -1223,7 +1827,18 @@ function addMapLayers(map: maplibregl.Map) {
         '#67e8a3',
         '#77d5ff',
       ],
-      'fill-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.18, 0.08],
+      'fill-opacity': [
+        'case',
+        ['boolean', ['get', 'selected'], false],
+        0.2,
+        ['in', ['get', 'contributionStatus'], ['literal', ['stale', 'lost', 'pending']]],
+        ['case', ['boolean', ['get', 'trackSelected'], false], 0.045, 0.025],
+        ['==', ['get', 'contributionStatus'], 'reacquiring'],
+        ['case', ['boolean', ['get', 'trackSelected'], false], 0.14, 0.07],
+        ['boolean', ['get', 'trackSelected'], false],
+        0.095,
+        0.035,
+      ],
     },
   })
   map.addLayer({
@@ -1240,8 +1855,28 @@ function addMapLayers(map: maplibregl.Map) {
         '#67e8a3',
         '#77d5ff',
       ],
-      'line-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.55, 0.24],
-      'line-width': 1,
+      'line-opacity': [
+        'case',
+        ['boolean', ['get', 'selected'], false],
+        0.62,
+        ['in', ['get', 'contributionStatus'], ['literal', ['stale', 'lost', 'pending']]],
+        ['case', ['boolean', ['get', 'trackSelected'], false], 0.16, 0.08],
+        ['==', ['get', 'contributionStatus'], 'reacquiring'],
+        ['case', ['boolean', ['get', 'trackSelected'], false], 0.48, 0.22],
+        ['boolean', ['get', 'trackSelected'], false],
+        0.34,
+        0.14,
+      ],
+      'line-width': [
+        'case',
+        ['boolean', ['get', 'selected'], false],
+        2,
+        ['==', ['get', 'contributionStatus'], 'reacquiring'],
+        1.8,
+        ['boolean', ['get', 'trackSelected'], false],
+        1.2,
+        0.85,
+      ],
     },
   })
   map.addLayer({
@@ -1264,11 +1899,28 @@ function addMapLayers(map: maplibregl.Map) {
         'case',
         ['boolean', ['get', 'selected'], false],
         0.72,
+        ['in', ['get', 'contributionStatus'], ['literal', ['stale', 'lost', 'pending']]],
+        ['case', ['boolean', ['get', 'trackSelected'], false], 0.18, 0.08],
+        ['==', ['get', 'contributionStatus'], 'reacquiring'],
+        ['case', ['boolean', ['get', 'trackSelected'], false], 0.58, 0.28],
+        ['all', ['boolean', ['get', 'active'], false], ['boolean', ['get', 'trackSelected'], false]],
+        0.42,
         ['boolean', ['get', 'active'], false],
-        0.48,
-        0.22,
+        0.18,
+        ['boolean', ['get', 'trackSelected'], false],
+        0.28,
+        0.12,
       ],
-      'line-width': ['case', ['boolean', ['get', 'selected'], false], 2.2, 1.1],
+      'line-width': [
+        'case',
+        ['boolean', ['get', 'selected'], false],
+        2.2,
+        ['==', ['get', 'contributionStatus'], 'reacquiring'],
+        1.8,
+        ['boolean', ['get', 'trackSelected'], false],
+        1.15,
+        0.8,
+      ],
     },
   })
   map.addLayer({
@@ -1276,11 +1928,11 @@ function addMapLayers(map: maplibregl.Map) {
     type: 'circle',
     source: 'platforms-source',
     paint: {
-      'circle-radius': ['case', ['boolean', ['get', 'selected'], false], 5.5, 3.4],
+      'circle-radius': ['case', ['boolean', ['get', 'selected'], false], 5.5, ['boolean', ['get', 'relevant'], false], 4.2, 2.7],
       'circle-color': '#8fa4b8',
-      'circle-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.72, 0.36],
+      'circle-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.72, ['boolean', ['get', 'relevant'], false], 0.42, 0.12],
       'circle-stroke-color': '#e7eef5',
-      'circle-stroke-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.45, 0.2],
+      'circle-stroke-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.45, ['boolean', ['get', 'relevant'], false], 0.22, 0.08],
       'circle-stroke-width': 1,
     },
   })
@@ -1289,7 +1941,7 @@ function addMapLayers(map: maplibregl.Map) {
     type: 'circle',
     source: 'sensors-source',
     paint: {
-      'circle-radius': ['case', ['boolean', ['get', 'selected'], false], 6.2, 3.8],
+      'circle-radius': ['case', ['boolean', ['get', 'selected'], false], 6.2, ['boolean', ['get', 'relevant'], false], 4.6, 2.8],
       'circle-color': [
         'match',
         ['get', 'modalityGroup'],
@@ -1301,7 +1953,7 @@ function addMapLayers(map: maplibregl.Map) {
         '#67e8a3',
         '#7ac6cb',
       ],
-      'circle-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.95, 0.46],
+      'circle-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.95, ['boolean', ['get', 'relevant'], false], 0.62, 0.16],
       'circle-stroke-color': '#06101b',
       'circle-stroke-width': 1.4,
     },
@@ -1332,9 +1984,11 @@ function addMapLayers(map: maplibregl.Map) {
         'case',
         ['boolean', ['get', 'selected'], false],
         13,
+        ['all', ['boolean', ['get', 'active'], false], ['boolean', ['get', 'trackSelected'], false]],
+        7.4,
         ['boolean', ['get', 'active'], false],
-        8,
-        6.5,
+        5.5,
+        4.2,
       ],
       'circle-color': [
         'match',
@@ -1351,9 +2005,13 @@ function addMapLayers(map: maplibregl.Map) {
         'case',
         ['boolean', ['get', 'selected'], false],
         0.24,
+        ['all', ['boolean', ['get', 'active'], false], ['boolean', ['get', 'trackSelected'], false]],
+        0.09,
         ['boolean', ['get', 'stale'], false],
-        0.08,
-        0.1,
+        0.025,
+        ['boolean', ['get', 'active'], false],
+        0.04,
+        0.025,
       ],
     },
   })
@@ -1362,7 +2020,16 @@ function addMapLayers(map: maplibregl.Map) {
     type: 'circle',
     source: 'detections-source',
     paint: {
-      'circle-radius': ['case', ['boolean', ['get', 'selected'], false], 5.5, ['boolean', ['get', 'active'], false], 4.5, 3.5],
+      'circle-radius': [
+        'case',
+        ['boolean', ['get', 'selected'], false],
+        5.5,
+        ['all', ['boolean', ['get', 'active'], false], ['boolean', ['get', 'trackSelected'], false]],
+        4.5,
+        ['boolean', ['get', 'active'], false],
+        3.4,
+        2.8,
+      ],
       'circle-color': [
         'match',
         ['get', 'modalityGroup'],
@@ -1374,9 +2041,26 @@ function addMapLayers(map: maplibregl.Map) {
         '#67e8a3',
         '#7ac6cb',
       ],
-      'circle-opacity': ['case', ['boolean', ['get', 'stale'], false], 0.38, 0.72],
+      'circle-opacity': [
+        'case',
+        ['boolean', ['get', 'selected'], false],
+        0.95,
+        ['boolean', ['get', 'stale'], false],
+        ['case', ['boolean', ['get', 'trackSelected'], false], 0.22, 0.12],
+        ['==', ['get', 'contributionStatus'], 'pending'],
+        ['case', ['boolean', ['get', 'trackSelected'], false], 0.3, 0.16],
+        ['==', ['get', 'contributionStatus'], 'reacquiring'],
+        ['case', ['boolean', ['get', 'trackSelected'], false], 0.78, 0.36],
+        ['all', ['boolean', ['get', 'active'], false], ['boolean', ['get', 'trackSelected'], false]],
+        0.56,
+        ['boolean', ['get', 'active'], false],
+        0.28,
+        ['boolean', ['get', 'trackSelected'], false],
+        0.42,
+        0.18,
+      ],
       'circle-stroke-color': ['case', ['boolean', ['get', 'selected'], false], '#ffffff', '#06101b'],
-      'circle-stroke-width': ['case', ['boolean', ['get', 'selected'], false], 2, 1.3],
+      'circle-stroke-width': ['case', ['boolean', ['get', 'selected'], false], 2, ['boolean', ['get', 'trackSelected'], false], 1.2, 0.8],
     },
   })
   map.addLayer({
@@ -1387,8 +2071,8 @@ function addMapLayers(map: maplibregl.Map) {
       'circle-radius': 22,
       'circle-color': 'rgba(0, 0, 0, 0)',
       'circle-stroke-color': '#ff643a',
-      'circle-stroke-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.95, 0.26],
-      'circle-stroke-width': ['case', ['boolean', ['get', 'selected'], false], 4.5, 2.4],
+      'circle-stroke-opacity': ['case', ['boolean', ['get', 'selected'], false], 0.95, 0.08],
+      'circle-stroke-width': ['case', ['boolean', ['get', 'selected'], false], 4.5, 1.4],
     },
   })
   map.addLayer({
@@ -1399,8 +2083,8 @@ function addMapLayers(map: maplibregl.Map) {
       'circle-radius': ['case', ['boolean', ['get', 'selected'], false], 8.5, 5.5],
       'circle-color': '#ff6a2d',
       'circle-stroke-color': '#fff0df',
-      'circle-opacity': ['case', ['boolean', ['get', 'selected'], false], 1, 0.42],
-      'circle-stroke-opacity': ['case', ['boolean', ['get', 'selected'], false], 1, 0.35],
+      'circle-opacity': ['case', ['boolean', ['get', 'selected'], false], 1, 0.2],
+      'circle-stroke-opacity': ['case', ['boolean', ['get', 'selected'], false], 1, 0.16],
       'circle-stroke-width': ['case', ['boolean', ['get', 'selected'], false], 2, 1],
     },
   })
@@ -1418,6 +2102,7 @@ function addMapLayers(map: maplibregl.Map) {
       'text-color': '#fff4eb',
       'text-halo-color': '#110905',
       'text-halo-width': 1.6,
+      'text-opacity': ['case', ['boolean', ['get', 'selected'], false], 1, 0.18],
     },
   })
 }
@@ -1432,6 +2117,7 @@ function updateMapSources(map: maplibregl.Map, data: MapData) {
     'probable-path-source': data.probablePath,
     'track-history-line-source': data.trackHistoryLine,
     'track-history-points-source': data.trackHistoryPoints,
+    'sensor-coverage-source': data.sensorCoverage,
     'bearing-lines-source': data.bearingLines,
     'bearing-cones-source': data.bearingCones,
     'platforms-source': data.platforms,
@@ -1457,67 +2143,73 @@ function setLayerVisibility(map: maplibregl.Map, layers: Record<LayerKey, boolea
 
 function buildTrackQueueItems({
   detections: records,
-  demoStep,
-  selectedDetectionId,
+  protectedAssets,
   tracks,
 }: {
   detections: Detection[]
-  demoStep: DemoStep | null
-  selectedDetectionId: string | null
+  protectedAssets: ProtectedAsset[]
   tracks: FusedTrack[]
 }) {
+  const referenceTimestamp =
+    [...tracks.map((track) => track.last_seen), ...records.map((detection) => detection.timestamp)]
+      .sort((a, b) => timestampValue(b) - timestampValue(a))[0] ?? '2026-05-02T17:43:30.000Z'
   const items: TrackQueueItem[] = tracks.map((track) => {
     const relatedDetections = records.filter((detection) => detection.contributes_to_track_id === track.track_id)
-    const latestDetection = [...relatedDetections].sort((a, b) => timestampValue(b.timestamp) - timestampValue(a.timestamp))[0]
     const sourceTypes = sourceTokens(track.source_summary)
+    const snapshot = buildThreatSnapshot(track, relatedDetections, protectedAssets)
 
     return {
       id: track.track_id,
       kind: 'track',
       label: 'Fused track',
-      classification: latestDetection?.classification ?? 'Fused contact',
+      priorityRank: 0,
+      severity: riskLabel(track.threat_score),
+      classification: snapshot.classification,
+      movementState: snapshot.movementState,
+      rangeLabel: snapshot.rangeLabel,
+      bearingLabel: snapshot.bearingLabel,
+      etaLabel: snapshot.etaLabel,
       confidence: track.confidence,
       threatScore: track.threat_score,
       custodyStatus: track.custody_status,
       sourceSummary: track.source_summary,
       sourceTypes,
       lastSeen: track.last_seen,
-      freshness: freshnessLabel(track.last_seen),
+      freshness: freshnessLabel(track.last_seen, referenceTimestamp),
       status: track.custody_status,
       trackId: track.track_id,
       track,
     }
   })
 
-  records.forEach((detection) => {
-    const parentTrack = tracks.find((track) => track.track_id === detection.contributes_to_track_id)
-    const status = getDetectionStatus(demoStep, detection, selectedDetectionId)
-
-    items.push({
-      id: detection.detection_id,
-      kind: 'detection',
-      label: modalityShortLabel(detection.modality),
-      classification: detection.classification,
-      confidence: detection.confidence,
-      threatScore: parentTrack ? Math.round(parentTrack.threat_score * detection.confidence) : Math.round(detection.confidence * 100),
-      custodyStatus: parentTrack?.custody_status ?? status,
-      sourceSummary: detection.sensor_id,
-      sourceTypes: [modalityShortLabel(detection.modality)],
-      lastSeen: detection.timestamp,
-      freshness: freshnessLabel(detection.timestamp),
-      status,
-      trackId: detection.contributes_to_track_id,
-      detection,
-    })
-  })
-
   return items.sort((a, b) => {
-    if (a.kind !== b.kind) {
-      return a.kind === 'track' ? -1 : 1
-    }
+    const aRisk = riskPriority(a.threatScore)
+    const bRisk = riskPriority(b.threatScore)
 
-    return timestampValue(b.lastSeen) - timestampValue(a.lastSeen)
-  })
+    return (
+      bRisk - aRisk ||
+      b.threatScore - a.threatScore ||
+      b.confidence - a.confidence ||
+      timestampValue(b.lastSeen) - timestampValue(a.lastSeen) ||
+      (b.kind === 'track' ? 1 : 0) - (a.kind === 'track' ? 1 : 0)
+    )
+  }).map((item, index) => ({ ...item, priorityRank: index + 1 }))
+}
+
+function riskPriority(score: number) {
+  if (score >= 70) {
+    return 4
+  }
+
+  if (score >= 55) {
+    return 3
+  }
+
+  if (score >= 35) {
+    return 2
+  }
+
+  return 1
 }
 
 function filterQueueItems(items: TrackQueueItem[], eventFilter: EventFilter, selectedTrackId: string, query: string) {
@@ -1557,7 +2249,7 @@ function filterQueueItems(items: TrackQueueItem[], eventFilter: EventFilter, sel
       return true
     }
 
-    return [item.id, item.trackId, item.classification, item.sourceSummary, item.custodyStatus]
+    return [item.id, item.trackId, item.classification, item.sourceSummary, item.custodyStatus, item.movementState, item.severity]
       .join(' ')
       .toLowerCase()
       .includes(normalizedQuery)
@@ -1573,14 +2265,7 @@ function TrackQueueCard({
   selected: boolean
   onSelect: () => void
 }) {
-  const symbol =
-    item.kind === 'track'
-      ? '⌁'
-      : modalityGroup(item.detection?.modality ?? '') === 'Radar'
-        ? '⌖'
-        : modalityGroup(item.detection?.modality ?? '') === 'EO'
-          ? '◉'
-          : '⌁'
+  const symbol = String(item.priorityRank)
 
   return (
     <button
@@ -1597,23 +2282,23 @@ function TrackQueueCard({
       onClick={onSelect}
     >
       <span className="queue-card-accent" aria-hidden="true" />
-      <span className="track-symbol" aria-hidden="true">{symbol}</span>
+      <span className="queue-rank" aria-label={`Priority ${item.priorityRank}`}>{symbol}</span>
       <span className="queue-meta">
-        <span>{item.label}</span>
+        <span>{item.severity}</span>
         <strong>{item.id}</strong>
       </span>
       <span className={`risk-badge risk-${riskLevel(item.threatScore)}`}>{riskLabel(item.threatScore)}</span>
       <strong className="queue-title">{item.classification}</strong>
-      <span className="queue-status">{item.status}</span>
+      <span className="queue-status">{item.movementState}</span>
       <span className="queue-freshness">{item.freshness}</span>
       <dl className="queue-metrics">
         <div>
-          <dt>Conf</dt>
-          <dd>{formatConfidence(item.confidence)}</dd>
+          <dt>Range</dt>
+          <dd>{item.rangeLabel}</dd>
         </div>
         <div>
-          <dt>Threat</dt>
-          <dd>{item.threatScore}</dd>
+          <dt>ETA</dt>
+          <dd>{item.etaLabel}</dd>
         </div>
         <div>
           <dt>Custody</dt>
@@ -1636,6 +2321,7 @@ function LeftTrackRail({
   demoStep,
   detections: records,
   eventFilter,
+  protectedAssets,
   queueQuery,
   selectedDetectionId,
   selectedTrack,
@@ -1654,6 +2340,7 @@ function LeftTrackRail({
   demoStep: DemoStep | null
   detections: Detection[]
   eventFilter: EventFilter
+  protectedAssets: ProtectedAsset[]
   queueQuery: string
   selectedDetectionId: string | null
   selectedTrack: FusedTrack
@@ -1669,8 +2356,8 @@ function LeftTrackRail({
   onStartDemo: () => void
 }) {
   const queueItems = useMemo(
-    () => buildTrackQueueItems({ detections: records, demoStep, selectedDetectionId, tracks }),
-    [demoStep, records, selectedDetectionId, tracks],
+    () => buildTrackQueueItems({ detections: records, protectedAssets, tracks }),
+    [protectedAssets, records, tracks],
   )
   const filteredItems = useMemo(
     () => filterQueueItems(queueItems, eventFilter, selectedTrackId, queueQuery),
@@ -1765,6 +2452,8 @@ function SensorLegend() {
     { className: 'acoustic-rf', label: 'RF / Acoustic', detail: 'bearing arc' },
     { className: 'eo', label: 'EO / IR', detail: 'line of sight' },
     { className: 'fused', label: 'Fused Track', detail: 'review target' },
+    { className: 'probable', label: 'Probable Path', detail: 'projected vector' },
+    { className: 'mission', label: 'Mission Area', detail: 'protected zone' },
   ]
 
   return (
@@ -1807,6 +2496,7 @@ function LayerControls({
 }
 
 function MissionMap({
+  briefing,
   mapData,
   readyStatus,
   selectedTrack,
@@ -1815,6 +2505,7 @@ function MissionMap({
   onSelectDetectionId,
   onSelectTrackId,
 }: {
+  briefing: ScenarioBriefing
   mapData: MapData
   readyStatus: string
   selectedTrack: FusedTrack
@@ -1972,6 +2663,29 @@ function MissionMap({
           <em>{readyStatus}</em>
         </div>
 
+        <section className="scenario-briefing-chip" aria-label="Scenario briefing">
+          <div>
+            <span>{briefing.scenario_name}</span>
+            <strong>{briefing.phase_label}</strong>
+            <p>{briefing.phase_description}</p>
+          </div>
+          <dl>
+            <div>
+              <dt>Time</dt>
+              <dd>{formatElapsed(briefing.elapsed_seconds)}</dd>
+            </div>
+            <div>
+              <dt>Tracks</dt>
+              <dd>{briefing.active_tracks}</dd>
+            </div>
+            <div>
+              <dt>High</dt>
+              <dd>{briefing.highest_threat}</dd>
+            </div>
+          </dl>
+          {briefing.next_event ? <em>{briefing.next_event}</em> : null}
+        </section>
+
         <div className="map-track-chip">
           <span>{selectedTrack.custody_status}</span>
           <strong>{riskLabel(selectedTrack.threat_score)} / {formatConfidence(selectedTrack.confidence)}</strong>
@@ -1996,56 +2710,94 @@ function RightWorkflowRail({
   actions,
   demoStep,
   detections: records,
+  protectedAssets,
   selectedTrack,
   onCreateAction,
 }: {
   actions: OperatorAction[]
   demoStep: DemoStep | null
   detections: Detection[]
+  protectedAssets: ProtectedAsset[]
   selectedTrack: FusedTrack
   onCreateAction: (actionType: string, label: string) => void
 }) {
-  const latestAction = actions[actions.length - 1]
-  const sourceTypes = sourceTokens(selectedTrack.source_summary)
   const relatedDetections = records.filter((detection) => detection.contributes_to_track_id === selectedTrack.track_id)
   const latestDetection = [...relatedDetections].sort((a, b) => timestampValue(b.timestamp) - timestampValue(a.timestamp))[0]
+  const threatSnapshot = buildThreatSnapshot(selectedTrack, relatedDetections, protectedAssets)
+  const commandRows = [
+    { label: 'Track ID', value: selectedTrack.track_id },
+    { label: 'Severity', value: riskLabel(selectedTrack.threat_score) },
+    { label: 'Classification', value: threatSnapshot.classification },
+    { label: 'Custody', value: selectedTrack.custody_status },
+    { label: 'Confidence', value: formatConfidence(selectedTrack.confidence) },
+    { label: 'Range / bearing', value: threatSnapshot.rangeBearingLabel },
+    { label: 'Heading / movement', value: `${threatSnapshot.headingLabel} / ${threatSnapshot.movementState}` },
+    { label: 'Speed', value: threatSnapshot.speedLabel },
+    { label: 'ETA to zone', value: threatSnapshot.etaLabel },
+    { label: 'Asset at risk', value: threatSnapshot.protectedAssetLabel },
+  ]
+  const evidenceItems =
+    selectedTrack.evidence && selectedTrack.evidence.length > 0
+      ? selectedTrack.evidence.slice(-4).map((artifact) => ({
+          id: artifact.artifact_id,
+          modality: artifact.modality,
+          label: modalityShortLabel(artifact.modality),
+          confidence: artifact.confidence,
+          timestamp: artifact.timestamp,
+          isNew: artifact.is_new,
+        }))
+      : relatedDetections.slice(-4).map((detection) => ({
+          id: detection.detection_id,
+          modality: detection.modality,
+          label: modalityShortLabel(detection.modality),
+          confidence: detection.confidence,
+          timestamp: detection.timestamp,
+          isNew: !detection.is_stale,
+        }))
+  const whyDroneRows = explainabilityRows(selectedTrack, records)
+  const operatorFeed = decisionFeedItems({
+    actions,
+    latestDetection,
+    selectedTrack,
+    snapshot: threatSnapshot,
+  })
 
   return (
     <aside className="right-rail" aria-labelledby="workflow-title">
       <section className={`decision-panel risk-${riskLevel(selectedTrack.threat_score)}`}>
         <div className="decision-header">
           <div>
-            <span>Selected Track</span>
+            <span>Selected Threat</span>
             <strong id="workflow-title">{selectedTrack.track_id}</strong>
           </div>
           <em>{riskLabel(selectedTrack.threat_score)}</em>
         </div>
-        <p className="track-classification">{latestDetection?.classification ?? 'Fused surface contact'}</p>
-        <dl className="summary-grid">
-          <div>
-            <dt>Confidence</dt>
-            <dd>{formatConfidence(selectedTrack.confidence)}</dd>
-          </div>
-          <div>
-            <dt>Custody</dt>
-            <dd>{selectedTrack.custody_status}</dd>
-          </div>
-          <div>
-            <dt>Threat</dt>
-            <dd>{selectedTrack.threat_score}</dd>
-          </div>
-          <div>
-            <dt>Last Seen</dt>
-            <dd>{formatTimestamp(selectedTrack.last_seen)}</dd>
-          </div>
+
+        <div className={`command-action ${demoStep?.emphasizeAction || selectedTrack.threat_score >= 70 ? 'is-emphasized' : ''}`}>
+          <span>Recommended Action</span>
+          <strong>{threatSnapshot.recommendedAction}</strong>
+          <p>{selectedTrack.explanation}</p>
+        </div>
+
+        <dl className="command-grid">
+          {commandRows.map((row) => (
+            <div key={row.label}>
+              <dt>{row.label}</dt>
+              <dd>{row.value}</dd>
+            </div>
+          ))}
         </dl>
+
         <div className="source-block">
-          <span>Sensor Fusion</span>
-          <div className="fusion-list">
-            {sourceTypes.map((source) => (
-              <div className={`fusion-row ${modalityClass(source)}`} key={source}>
-                <strong>{source}</strong>
-                <span>{source.includes('EO') ? 'Visual' : source.includes('Acoustic') ? 'Correlated' : 'Confirmed'}</span>
+          <span>Why the system believes this is a drone</span>
+          <div className="explain-list">
+            {whyDroneRows.map((row) => (
+              <div className={row.active ? 'explain-row is-active' : 'explain-row'} key={row.label}>
+                <strong>{row.label}</strong>
+                <span>
+                  {row.status}
+                  {typeof row.confidence === 'number' ? ` / ${formatConfidence(row.confidence)}` : ''}
+                </span>
                 <i aria-hidden="true" />
               </div>
             ))}
@@ -2054,27 +2806,30 @@ function RightWorkflowRail({
         <div className="evidence-block">
           <div className="evidence-heading">
             <span>Evidence</span>
-            <strong>{relatedDetections.length} items</strong>
+            <strong>{selectedTrack.evidence?.length ?? relatedDetections.length} items</strong>
           </div>
           <div className="evidence-strip">
-            {relatedDetections.slice(-4).map((detection) => (
-              <button className={`evidence-thumb ${modalityClass(detection.modality)}`} key={detection.detection_id} type="button">
-                <span>{modalityShortLabel(detection.modality)}</span>
-                <strong>{formatConfidence(detection.confidence)}</strong>
+            {evidenceItems.map((evidence) => (
+              <button
+                className={`evidence-thumb ${modalityClass(evidence.modality)} ${evidence.isNew ? 'is-new' : ''}`}
+                key={evidence.id}
+                type="button"
+              >
+                <span>{evidence.label}</span>
+                <em>{formatTimestamp(evidence.timestamp)}</em>
+                <strong>{formatConfidence(evidence.confidence)}</strong>
               </button>
             ))}
           </div>
         </div>
       </section>
 
-      <section className={`recommendation-panel ${demoStep?.emphasizeAction ? 'is-emphasized' : ''}`}>
-        <span>Recommended Next Action</span>
-        <strong>{selectedTrack.recommended_next_action}</strong>
-        <p>{selectedTrack.explanation}</p>
+      <section className="recommendation-panel">
+        <span>Operator Commands</span>
         <div className="workflow-actions" aria-label="Operator actions">
           {actionButtons.map((action) => (
             <button
-              className={action.action_type === 'reacquire' || action.action_type === 'dispatch' ? 'is-primary' : ''}
+              className={action.label === threatSnapshot.recommendedAction || action.action_type === 'slew_eoir' ? 'is-primary' : ''}
               key={action.action_type}
               type="button"
               onClick={() => onCreateAction(action.action_type, action.label)}
@@ -2085,76 +2840,189 @@ function RightWorkflowRail({
         </div>
       </section>
 
-      <section className="audit-panel" aria-live="polite">
+      <section className="audit-panel operator-feed-panel" aria-live="polite">
         <div className="rail-section-header">
-          <span>Action Feed</span>
-          <strong>{actions.length} events</strong>
-        </div>
-        <div className="feed-context">
-          <span>Latest detection</span>
-          <strong>{latestDetection ? `${latestDetection.detection_id} / ${modalityShortLabel(latestDetection.modality)}` : 'None'}</strong>
+          <span>Operator Feed</span>
+          <strong>{operatorFeed.length} items</strong>
         </div>
         <div className="audit-list">
-          {[...actions].reverse().slice(0, 5).map((action) => (
-            <article className="audit-item" key={action.action_id}>
-              <span>{formatTimestamp(action.timestamp)}</span>
-              <strong>{action.label}</strong>
-              <small>{action.resulting_status ?? action.action_type}</small>
+          {operatorFeed.map((item) => (
+            <article className={`audit-item feed-${custodyClass(item.type)}`} key={item.id}>
+              <span>{formatTimestamp(item.timestamp)}</span>
+              <strong>{item.title}</strong>
+              <small>{item.detail}</small>
             </article>
           ))}
         </div>
         <div className="latest-action">
-          <span>Latest</span>
-          <strong>{latestAction.label}</strong>
+          <span>Current action</span>
+          <strong>{threatSnapshot.recommendedAction}</strong>
         </div>
       </section>
     </aside>
   )
 }
+
+const defaultScenarioKey: SimulationScenarioKey = 'harborIntrusion'
+
+function staticBriefing(dataMode: DataMode, tracks: FusedTrack[]): ScenarioBriefing {
+  const highestThreat = Math.max(0, ...tracks.map((track) => track.threat_score))
+
+  return {
+    scenario_key: dataMode,
+    scenario_name: dataMode === 'palantirMission' ? 'Palantir mission data' : 'Palantir snapshot',
+    objective: dataMode === 'palantirMission' ? 'Review read-only mission objects on the active branch.' : 'Inspect ontology-backed platform and sensor data.',
+    phase_label: dataMode === 'palantirMission' ? 'Mission snapshot' : 'Ontology snapshot',
+    phase_description:
+      dataMode === 'palantirMission'
+        ? 'Detection, fused track, and operator action records are loaded from the mission dataset snapshot.'
+        : 'Platform and sensor objects are loaded from Palantir while local fusion data remains static.',
+    elapsed_seconds: 0,
+    next_event: undefined,
+    active_tracks: tracks.length,
+    highest_threat: highestThreat,
+  }
+}
+
+function createSimulationRuntime(scenarioKey: SimulationScenarioKey): {
+  engine: ScenarioEngine
+  heroTrackId: string
+  ui: ReturnType<typeof simulationToUi>
+} {
+  const engine = createScenarioEngine(scenarioKey)
+  const snapshot = engine.getSnapshot()
+
+  return {
+    engine,
+    heroTrackId: snapshot.heroTrackId,
+    ui: simulationToUi(snapshot),
+  }
+}
+
 function App() {
   const [localOperatorActions, setLocalOperatorActions] = useState<OperatorAction[]>([])
   const [demoStepIndex, setDemoStepIndex] = useState<number | null>(null)
-  const [dataMode, setDataMode] = useState<DataMode>('palantirSnapshot')
+  const [dataMode, setDataMode] = useState<DataMode>('local')
   const [eventFilter, setEventFilter] = useState<EventFilter>('all')
   const [queueQuery, setQueueQuery] = useState('')
   const [selectedTrackId, setSelectedTrackId] = useState('TRK-SM-001')
   const [selectedDetectionId, setSelectedDetectionId] = useState<string | null>(null)
   const [visibleLayers, setVisibleLayers] = useState<Record<LayerKey, boolean>>(defaultLayerState)
+  const [simulationScenario, setSimulationScenario] = useState<SimulationScenarioKey>(defaultScenarioKey)
+  const [simulationPlaying, setSimulationPlaying] = useState(true)
+  const [simulationSpeed, setSimulationSpeed] = useState<SimulationSpeed>(1)
+  const [simulationRuntime, setSimulationRuntime] = useState(() => createSimulationRuntime(defaultScenarioKey))
+
+  const simulationUi = simulationRuntime.ui
+  const palantirSnapshotUi = useMemo(
+    () =>
+      ontologySnapshotToUi({
+        platforms: palantirPlatforms,
+        sensors: palantirSensors,
+        detections,
+        fusedTracks,
+        operatorActions: initialActions,
+      }),
+    [],
+  )
+  const palantirMissionUi = useMemo(
+    () =>
+      ontologySnapshotToUi({
+        platforms: palantirPlatforms,
+        sensors: palantirSensors,
+        detections: palantirMissionDetections,
+        fusedTracks: palantirMissionFusedTracks,
+        operatorActions: palantirMissionOperatorActions,
+      }),
+    [],
+  )
+
+  useEffect(() => {
+    if (dataMode !== 'local' || !simulationPlaying) {
+      return
+    }
+
+    const intervalId = window.setInterval(() => {
+      setSimulationRuntime((currentRuntime) => {
+        currentRuntime.engine.advance(simulationSpeed)
+        return {
+          engine: currentRuntime.engine,
+          heroTrackId: currentRuntime.heroTrackId,
+          ui: simulationToUi(currentRuntime.engine.getSnapshot()),
+        }
+      })
+    }, 1000)
+
+    return () => window.clearInterval(intervalId)
+  }, [dataMode, simulationPlaying, simulationSpeed])
 
   const activeDemoSteps = dataMode === 'palantirMission' ? palantirMissionDemoSteps : demoSteps
-  const currentDemoStep = demoStepIndex === null ? null : activeDemoSteps[demoStepIndex] ?? null
+  const currentDemoStep = dataMode === 'local' || demoStepIndex === null ? null : activeDemoSteps[demoStepIndex] ?? null
   const hasPalantirSnapshot = palantirPlatforms.length > 0 && palantirSensors.length > 0
   const hasPalantirMissionData = palantirMissionDetections.length > 0 && palantirMissionFusedTracks.length > 0
   const usesPalantirSensors = dataMode === 'palantirSnapshot' || dataMode === 'palantirMission'
   const activePlatforms: Platform[] =
-    usesPalantirSensors && palantirPlatforms.length > 0 ? palantirPlatforms : localPlatforms
+    dataMode === 'local' ? simulationUi.platforms : usesPalantirSensors && palantirPlatforms.length > 0 ? palantirSnapshotUi.platforms : localPlatforms
   const activeSensors: Sensor[] =
-    usesPalantirSensors && palantirSensors.length > 0 ? palantirSensors : localSensors
+    dataMode === 'local' ? simulationUi.sensors : usesPalantirSensors && palantirSensors.length > 0 ? palantirSnapshotUi.sensors : localSensors
   const activeDetections: Detection[] =
-    dataMode === 'palantirMission' && palantirMissionDetections.length > 0 ? palantirMissionDetections : detections
+    dataMode === 'local'
+      ? simulationUi.detections
+      : dataMode === 'palantirMission' && palantirMissionDetections.length > 0
+        ? palantirMissionUi.detections
+        : palantirSnapshotUi.detections
   const activeFusedTracks: FusedTrack[] =
-    dataMode === 'palantirMission' && palantirMissionFusedTracks.length > 0 ? palantirMissionFusedTracks : fusedTracks
+    dataMode === 'local'
+      ? simulationUi.fusedTracks
+      : dataMode === 'palantirMission' && palantirMissionFusedTracks.length > 0
+        ? palantirMissionUi.fusedTracks
+        : palantirSnapshotUi.fusedTracks
   const baseOperatorActions: OperatorAction[] =
     dataMode === 'palantirMission' && palantirMissionOperatorActions.length > 0
-      ? palantirMissionOperatorActions
-      : initialActions
+      ? palantirMissionUi.operatorActions
+      : dataMode === 'local'
+        ? simulationUi.operatorActions
+        : palantirSnapshotUi.operatorActions
+  const activeProtectedAssets = dataMode === 'local' ? simulationUi.protectedAssets : emptyProtectedAssets
+  const activeProtectedZones = dataMode === 'local' ? simulationUi.protectedZones : emptyProtectedZones
+  const activeBriefing =
+    dataMode === 'local'
+      ? simulationUi.briefing ?? {
+          scenario_key: simulationScenario,
+          scenario_name: scenarioOptions.find((scenario) => scenario.key === simulationScenario)?.label ?? 'Live Demo',
+          objective: 'Run the deterministic local mission simulation.',
+          phase_label: 'Live simulation',
+          phase_description: simulationUi.statusText,
+          elapsed_seconds: 0,
+          next_event: undefined,
+          active_tracks: activeFusedTracks.length,
+          highest_threat: Math.max(0, ...activeFusedTracks.map((track) => track.threat_score)),
+        }
+      : staticBriefing(dataMode, activeFusedTracks)
   const usingFallbackData =
     (dataMode === 'palantirSnapshot' && !hasPalantirSnapshot) ||
     (dataMode === 'palantirMission' && (!hasPalantirSnapshot || !hasPalantirMissionData))
   const modeStatusText =
-    dataMode === 'palantirMission'
+    dataMode === 'local'
+      ? `${scenarioOptions.find((scenario) => scenario.key === simulationScenario)?.label ?? 'Live Demo'} / ${simulationUi.statusText}`
+      : dataMode === 'palantirMission'
       ? `Proposal OPEN ${palantirMissionMetadata.proposalRid.slice(-8)} / branch ${palantirMissionMetadata.branchRid.slice(-8)} active`
       : dataMode === 'palantirSnapshot'
         ? `${palantirSnapshotMetadata.objectTypesUsed.length} Palantir object types`
         : 'Local ontology mock'
   const mapReadyStatus =
-    dataMode === 'palantirMission'
+    dataMode === 'local'
+      ? simulationUi.statusText
+      : dataMode === 'palantirMission'
       ? 'Palantir mission data active'
       : dataMode === 'palantirSnapshot'
         ? 'Palantir platform/sensor snapshot with local fusion'
         : 'Local ontology mock active'
   const selectedBaseTrack = useMemo(
-    () => activeFusedTracks.find((track) => track.track_id === selectedTrackId) ?? activeFusedTracks[0] ?? fusedTracks[0],
+    () =>
+      activeFusedTracks.find((track) => track.track_id === selectedTrackId) ??
+      [...activeFusedTracks].sort((a, b) => b.threat_score - a.threat_score)[0] ??
+      fusedTracks[0],
     [activeFusedTracks, selectedTrackId],
   )
   const selectedTrack: FusedTrack = useMemo(
@@ -2186,14 +3054,26 @@ function App() {
         allTracks: activeFusedTracks,
         detections: activeDetections,
         demoStep: currentDemoStep,
+        protectedAssets: activeProtectedAssets,
+        protectedZones: activeProtectedZones,
         selectedDetectionId,
         selectedTrack,
       }),
-    [activeDetections, activeFusedTracks, activePlatforms, activeSensors, currentDemoStep, selectedDetectionId, selectedTrack],
+    [
+      activeDetections,
+      activeFusedTracks,
+      activePlatforms,
+      activeProtectedAssets,
+      activeProtectedZones,
+      activeSensors,
+      currentDemoStep,
+      selectedDetectionId,
+      selectedTrack,
+    ],
   )
 
   function createOperatorAction(actionType: string, label: string) {
-    const timestamp = new Date().toISOString().slice(11, 19) + 'Z'
+    const timestamp = dataMode === 'local' ? selectedTrack.updated_at ?? selectedTrack.last_seen : new Date().toISOString().slice(11, 19) + 'Z'
 
     setLocalOperatorActions((currentActions) => {
       const nextAction: OperatorAction = {
@@ -2236,6 +3116,22 @@ function App() {
     setDemoStepIndex(null)
   }
 
+  function restartSimulation() {
+    const nextRuntime = createSimulationRuntime(simulationScenario)
+    setSimulationRuntime(nextRuntime)
+    setSelectedTrackId(nextRuntime.heroTrackId)
+    setSelectedDetectionId(null)
+  }
+
+  function changeSimulationScenario(scenarioKey: SimulationScenarioKey) {
+    const nextRuntime = createSimulationRuntime(scenarioKey)
+    setSimulationScenario(scenarioKey)
+    setSimulationRuntime(nextRuntime)
+    setSelectedTrackId(nextRuntime.heroTrackId)
+    setSelectedDetectionId(null)
+    setLocalOperatorActions([])
+  }
+
   function toggleLayer(layer: LayerKey) {
     setVisibleLayers((currentLayers) => ({
       ...currentLayers,
@@ -2257,8 +3153,9 @@ function App() {
         <div className="ops-readouts" aria-label="Mission status readouts">
           <span>UTC <strong>{formatTimestamp(selectedTrack.last_seen)}</strong></span>
           <span>Mission <strong>{selectedTrack.mission_area.replace('MissionArea-', '')}</strong></span>
+          <span>Phase <strong>{activeBriefing.phase_label}</strong></span>
+          <span>Elapsed <strong>{formatElapsed(activeBriefing.elapsed_seconds)}</strong></span>
           <span>Conditions <strong>Clear</strong></span>
-          <span>Wind <strong>6 km/h NW</strong></span>
         </div>
         <div className="header-controls">
           <div className="system-pips" aria-label="System health">
@@ -2272,6 +3169,8 @@ function App() {
               type="button"
               onClick={() => {
                 setDataMode('local')
+                setDemoStepIndex(null)
+                setSelectedTrackId(simulationRuntime.heroTrackId)
                 setSelectedDetectionId(null)
               }}
             >
@@ -2282,6 +3181,7 @@ function App() {
               type="button"
               onClick={() => {
                 setDataMode('palantirSnapshot')
+                setSelectedTrackId('TRK-SM-001')
                 setSelectedDetectionId(null)
               }}
             >
@@ -2292,12 +3192,43 @@ function App() {
               type="button"
               onClick={() => {
                 setDataMode('palantirMission')
+                setSelectedTrackId('TRK-SM-001')
                 setSelectedDetectionId(null)
               }}
             >
               Mission Data
             </button>
           </div>
+          {dataMode === 'local' ? (
+            <div className="simulation-controls" aria-label="Live demo controls">
+              <span>{formatElapsed(activeBriefing.elapsed_seconds)}</span>
+              <select
+                aria-label="Scenario"
+                value={simulationScenario}
+                onChange={(event) => changeSimulationScenario(event.target.value as SimulationScenarioKey)}
+              >
+                {scenarioOptions.map((scenario) => (
+                  <option key={scenario.key} value={scenario.key}>
+                    {scenario.label}
+                  </option>
+                ))}
+              </select>
+              <button type="button" onClick={() => setSimulationPlaying((isPlaying) => !isPlaying)}>
+                {simulationPlaying ? 'Pause' : 'Play'}
+              </button>
+              {[1, 2, 5].map((speed) => (
+                <button
+                  className={simulationSpeed === speed ? 'is-selected' : ''}
+                  key={speed}
+                  type="button"
+                  onClick={() => setSimulationSpeed(speed as SimulationSpeed)}
+                >
+                  {speed}x
+                </button>
+              ))}
+              <button type="button" onClick={restartSimulation}>Restart</button>
+            </div>
+          ) : null}
           <button className="systems-button" type="button">Systems</button>
           <div className="header-status">
             <span>{usingFallbackData ? `Fallback / ${modeStatusText}` : modeStatusText}</span>
@@ -2318,6 +3249,7 @@ function App() {
           demoStep={currentDemoStep}
           detections={activeDetections}
           eventFilter={eventFilter}
+          protectedAssets={activeProtectedAssets}
           queueQuery={queueQuery}
           selectedTrack={selectedTrack}
           selectedDetectionId={selectedDetectionId}
@@ -2333,6 +3265,7 @@ function App() {
           onStartDemo={startDemo}
         />
         <MissionMap
+          briefing={activeBriefing}
           mapData={mapData}
           readyStatus={currentDemoStep?.mapStatus ?? mapReadyStatus}
           selectedTrack={selectedTrack}
@@ -2345,6 +3278,7 @@ function App() {
           actions={operatorActions}
           demoStep={currentDemoStep}
           detections={activeDetections}
+          protectedAssets={activeProtectedAssets}
           selectedTrack={selectedTrack}
           onCreateAction={createOperatorAction}
         />

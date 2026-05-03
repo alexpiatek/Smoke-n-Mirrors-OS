@@ -143,11 +143,16 @@ export const palantirMissionFusedTracks = [
     estimated_lat: 37.8078,
     estimated_lon: -122.3749,
     source_summary: 'Radar + RF + EO + IR',
-    recommended_next_action: 'Reacquire with EO and keep radar custody',
+    recommended_next_action: 'Slew EO/IR to projected intercept',
     explanation:
-      'Multiple independent detections agree on a slow small craft moving northeast inside the protected waterfront zone',
+      'Multiple independent detections agree on a low-altitude UAV moving northeast inside the protected waterfront zone',
     created_at: '2026-05-02T17:41:12.000Z',
     updated_at: '2026-05-02T17:43:03.000Z',
+    classification: 'Probable UAV',
+    heading_deg: 58,
+    speed_mps: 15.4,
+    distance_to_asset_m: 1180,
+    eta_seconds_to_asset: 190,
   },
 ]
 

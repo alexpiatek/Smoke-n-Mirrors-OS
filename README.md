@@ -1,73 +1,115 @@
-# React + TypeScript + Vite
+# SmokenMirrorsOS
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A simple hackathon demo for fusing noisy sensor detections into one explainable target track.
 
-Currently, two official plugins are available:
+## What it does
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+SmokenMirrorsOS shows how an operator could combine detections from multiple sensor types into a single operational view.
 
-## React Compiler
+The demo uses fake/simulated data from:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Radar
+- Acoustic / RF
+- EO camera / visual detection
 
-## Expanding the ESLint configuration
+The system displays:
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+- Live sensor detections
+- A simple map / track view
+- One fused target track
+- Confidence score
+- Custody status
+- Recommended next action for the operator
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Why this matters
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+Modern operators often receive separate alerts from different sensors.
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+The hard part is answering:
+
+> Are these detections describing the same object?
+
+SmokenMirrorsOS demonstrates a simple workflow for turning separate detections into one explainable decision.
+
+Example:
+
+> Radar sees a contact.  
+> Acoustic/RF supports the same bearing.  
+> EO camera briefly confirms a possible drone.  
+> Visual contact drops.  
+> The system keeps custody using radar + acoustic/RF and recommends where to retask the camera.
+
+## Hackathon problem fit
+
+This project fits the **Sensor Analysis and Integration** problem statement.
+
+It focuses on:
+
+- Combining detections across sensor types
+- Maintaining custody of a target
+- Explaining confidence to a human operator
+- Recommending the next sensor action
+
+## Demo flow
+
+1. Open the dashboard.
+2. Review incoming radar, acoustic/RF, and EO detections.
+3. See the system display one fused track.
+4. Watch confidence increase as sensors agree.
+5. See visual contact drop.
+6. The system maintains custody using the remaining sensors.
+7. Operator chooses:
+   - Confirm Track
+   - False Alarm
+   - Reacquire
+
+## Current status
+
+This is an early hackathon demo.
+
+Currently included:
+
+- Local React app
+- Fake hard-coded sensor data
+- Dashboard panels
+- Simple map / track view
+- Fused track summary
+- Timeline view
+
+Not included yet:
+
+- Real sensor ingest
+- Real radar/acoustic/camera integrations
+- Palantir integration
+- Authentication
+- Database
+- Production deployment
+
+## Tech stack
+
+- React
+- TypeScript
+- Vite
+- CSS
+
+No backend is required for the current demo.
+
+## How to run locally
+
+Install dependencies:
+
+```bash
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Start the dev server:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+```bash
+npm run dev
+```
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+Open the local URL shown by Vite, usually:
+
+```text
+http://127.0.0.1:5173/
 ```
