@@ -1,0 +1,12 @@
+{
+  "foundryUrl": "https://nshackathon.palantirfoundry.com",
+  "site": {
+    "application": "ri.third-party-applications.main.application.0de0c7c1-ff09-4dd5-bcc3-ee09cb116f33",
+    "directory": "./dist",
+    "autoVersion": {
+      "type": "git-describe",
+      "tagPrefix": ""
+    },
+    "uploadOnly": false
+  }
+}

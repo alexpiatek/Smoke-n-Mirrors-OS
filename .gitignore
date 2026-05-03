@@ -24,3 +24,8 @@ dist-ssr
 *.sw?
 
 .vercel
+
+# Drone workspace: nested clones were flattened for this monorepo; env files hold OAuth values
+drone/**/.env.production
+drone/**/.env.development
+drone/**/.env.code-workspaces

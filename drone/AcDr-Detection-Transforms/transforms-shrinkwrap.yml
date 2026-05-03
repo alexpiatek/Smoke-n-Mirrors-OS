@@ -1,0 +1,32 @@
+---
+mappings:
+- alias: "/Users/drew@hooperco.org/AcDr Detection/audio_detections"
+  modes:
+  - "BUILD"
+  path: "/deprecated-field"
+  rid: "ri.foundry.main.dataset.379a1907-7402-4a67-9963-9a52638da052"
+- alias: "/Users/drew@hooperco.org/AcDr Detection/background_detections"
+  modes:
+  - "BUILD"
+  path: "/deprecated-field"
+  rid: "ri.foundry.main.dataset.88e809d4-bff9-4518-8284-a4136dc39e25"
+- alias: "/Users/drew@hooperco.org/AcDr Detection/huggingface_detections"
+  modes:
+  - "BUILD"
+  path: "/deprecated-field"
+  rid: "ri.foundry.main.dataset.4d5e9d61-00fd-4eca-a696-9d00df591845"
+- alias: "ri.foundry.main.dataset.dc3acf89-16a0-4e5f-a6ed-642bb8e6b0cc"
+  modes:
+  - "READ"
+  path: "/deprecated-field"
+  rid: "ri.foundry.main.dataset.dc3acf89-16a0-4e5f-a6ed-642bb8e6b0cc"
+- alias: "ri.foundry.main.dataset.e369cff4-b0ec-4417-8f2e-7ab20cd3ec56"
+  modes:
+  - "READ"
+  path: "/deprecated-field"
+  rid: "ri.foundry.main.dataset.e369cff4-b0ec-4417-8f2e-7ab20cd3ec56"
+- alias: "ri.mio.main.media-set.1f55cdfb-ed81-441a-9e8d-1bfa42f41be4"
+  modes:
+  - "READ"
+  path: "/deprecated-field"
+  rid: "ri.mio.main.media-set.1f55cdfb-ed81-441a-9e8d-1bfa42f41be4"

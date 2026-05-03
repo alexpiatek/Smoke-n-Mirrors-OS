@@ -1,0 +1,28 @@
+---
+mappings:
+- alias: "/Users/drew@hooperco.org/AcDr Detection/drone_classifier_model"
+  modes:
+  - "BUILD"
+  - "READ"
+  path: "/deprecated-field"
+  rid: "ri.models.main.model.040b1415-3db4-4676-afbb-6ca33100d266"
+- alias: "/Users/drew@hooperco.org/AcDr Detection/ml_batch_predictions"
+  modes:
+  - "BUILD"
+  path: "/deprecated-field"
+  rid: "ri.foundry.main.dataset.f333efa6-6907-4d35-8c17-db1e92477766"
+- alias: "ri.foundry.main.dataset.379a1907-7402-4a67-9963-9a52638da052"
+  modes:
+  - "READ"
+  path: "/deprecated-field"
+  rid: "ri.foundry.main.dataset.379a1907-7402-4a67-9963-9a52638da052"
+- alias: "ri.foundry.main.dataset.4d5e9d61-00fd-4eca-a696-9d00df591845"
+  modes:
+  - "READ"
+  path: "/deprecated-field"
+  rid: "ri.foundry.main.dataset.4d5e9d61-00fd-4eca-a696-9d00df591845"
+- alias: "ri.foundry.main.dataset.88e809d4-bff9-4518-8284-a4136dc39e25"
+  modes:
+  - "READ"
+  path: "/deprecated-field"
+  rid: "ri.foundry.main.dataset.88e809d4-bff9-4518-8284-a4136dc39e25"

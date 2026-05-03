@@ -1,0 +1,35 @@
+{
+  "resources": {
+    "ontologies": [
+      {
+        "identifier": {
+          "rid": "ri.ontology.main.ontology.41fccd0c-2180-4c1d-841d-8a488d1abb46"
+        },
+        "verbs": [
+          "ONTOLOGIES_READ"
+        ]
+      }
+    ],
+    "objects": [
+      {
+        "identifier": {
+          "rid": "ri.ontology.main.object-type.02cd29e9-fd6f-4520-abc4-aedbfc3c70b5"
+        },
+        "verbs": [
+          "ONTOLOGIES_READ"
+        ]
+      }
+    ],
+    "links": [],
+    "interfaces": [],
+    "queries": [],
+    "osdks": [],
+    "models": [],
+    "custom": {}
+  },
+  "egress": {
+    "connections": []
+  },
+  "_comment": "DO NOT DELETE THIS FILE. MODIFYING CONTENTS MANUALLY MAY RESULT IN COMPILE ERRORS",
+  "version": 1
+}
