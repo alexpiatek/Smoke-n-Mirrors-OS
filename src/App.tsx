@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import './App.css'
+import { palantirPlatforms, palantirSensors, palantirSnapshotMetadata } from './data/palantirSnapshot'
 
 type Platform = {
   platform_id: string
@@ -68,7 +69,9 @@ type DemoStep = {
   emphasizeAction: boolean
 }
 
-const platforms: Platform[] = [
+type DataMode = 'local' | 'palantirSnapshot'
+
+const localPlatforms: Platform[] = [
   {
     platform_id: 'PLAT-HARBOR-01',
     callsign: 'Harbor Watch',
@@ -95,7 +98,7 @@ const platforms: Platform[] = [
   },
 ]
 
-const sensors: Sensor[] = [
+const localSensors: Sensor[] = [
   {
     sensor_id: 'SENS-RDR-21',
     platform_id: 'PLAT-HARBOR-01',
@@ -305,15 +308,28 @@ function formatConfidence(confidence: number) {
   return `${Math.round(confidence * 100)}%`
 }
 
-function projectPoint(lat: number, lon: number) {
-  const minLat = 37.801
-  const maxLat = 37.813
-  const minLon = -122.397
-  const maxLon = -122.364
-  const x = 70 + ((lon - minLon) / (maxLon - minLon)) * 480
-  const y = 325 - ((lat - minLat) / (maxLat - minLat)) * 245
+function createProjector(points: Array<{ lat: number; lon: number }>) {
+  const validPoints = points.filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lon))
 
-  return { x, y }
+  if (validPoints.length === 0) {
+    return () => ({ x: 310, y: 195 })
+  }
+
+  const latValues = validPoints.map((point) => point.lat)
+  const lonValues = validPoints.map((point) => point.lon)
+  const minLat = Math.min(...latValues)
+  const maxLat = Math.max(...latValues)
+  const minLon = Math.min(...lonValues)
+  const maxLon = Math.max(...lonValues)
+  const latRange = maxLat - minLat || 0.01
+  const lonRange = maxLon - minLon || 0.01
+
+  return (lat: number, lon: number) => {
+    const x = 70 + ((lon - minLon) / lonRange) * 480
+    const y = 325 - ((lat - minLat) / latRange) * 245
+
+    return { x, y }
+  }
 }
 
 function SensorFeed({ demoStep }: { demoStep: DemoStep | null }) {
@@ -383,7 +399,21 @@ function SensorFeed({ demoStep }: { demoStep: DemoStep | null }) {
   )
 }
 
-function TrackMap({ selectedTrack, demoStep }: { selectedTrack: FusedTrack; demoStep: DemoStep | null }) {
+function TrackMap({
+  activePlatforms,
+  activeSensors,
+  selectedTrack,
+  demoStep,
+}: {
+  activePlatforms: Platform[]
+  activeSensors: Sensor[]
+  selectedTrack: FusedTrack
+  demoStep: DemoStep | null
+}) {
+  const projectPoint = createProjector([
+    ...activePlatforms.map((platform) => ({ lat: platform.lat, lon: platform.lon })),
+    { lat: selectedTrack.estimated_lat, lon: selectedTrack.estimated_lon },
+  ])
   const trackPoint = projectPoint(selectedTrack.estimated_lat, selectedTrack.estimated_lon)
 
   return (
@@ -419,9 +449,9 @@ function TrackMap({ selectedTrack, demoStep }: { selectedTrack: FusedTrack; demo
             <text x="49" y="97">{demoStep?.mapStatus ?? 'Local ontology mock ready.'}</text>
           </g>
 
-          {platforms.map((platform) => {
+          {activePlatforms.map((platform) => {
             const point = projectPoint(platform.lat, platform.lon)
-            const platformSensors = sensors.filter((sensor) => sensor.platform_id === platform.platform_id)
+            const platformSensors = activeSensors.filter((sensor) => sensor.platform_id === platform.platform_id)
 
             return (
               <g className="platform-cluster" key={platform.platform_id}>
@@ -580,10 +610,43 @@ function Timeline({ demoStep }: { demoStep: DemoStep | null }) {
   )
 }
 
+function SnapshotExplanation({
+  dataMode,
+  usingFallbackData,
+}: {
+  dataMode: DataMode
+  usingFallbackData: boolean
+}) {
+  return (
+    <section className="snapshot-panel" aria-label="Palantir snapshot explanation">
+      <div>
+        <span>Ontology Snapshot</span>
+        <strong>
+          {dataMode === 'palantirSnapshot'
+            ? 'Platforms and Sensors are read from Palantir. Detections and fused custody state are local demo objects mapped in PALANTIR_MAPPING.md.'
+            : 'Using local mock Platform and Sensor data. Palantir snapshot data is available for the snapshot mode.'}
+        </strong>
+      </div>
+      <p>
+        {palantirSnapshotMetadata.ontologyName} / {palantirSnapshotMetadata.objectTypesUsed.length} object types /
+        fetched {palantirSnapshotMetadata.fetchedAt}
+        {usingFallbackData ? ' / snapshot empty, falling back to local mock data' : ''}
+      </p>
+    </section>
+  )
+}
+
 function App() {
   const [operatorActions, setOperatorActions] = useState<OperatorAction[]>(initialActions)
   const [demoStepIndex, setDemoStepIndex] = useState<number | null>(null)
+  const [dataMode, setDataMode] = useState<DataMode>('palantirSnapshot')
   const currentDemoStep = demoStepIndex === null ? null : demoSteps[demoStepIndex]
+  const hasPalantirSnapshot = palantirPlatforms.length > 0 && palantirSensors.length > 0
+  const activePlatforms: Platform[] =
+    dataMode === 'palantirSnapshot' && palantirPlatforms.length > 0 ? palantirPlatforms : localPlatforms
+  const activeSensors: Sensor[] =
+    dataMode === 'palantirSnapshot' && palantirSensors.length > 0 ? palantirSensors : localSensors
+  const usingFallbackData = dataMode === 'palantirSnapshot' && !hasPalantirSnapshot
   const selectedTrack: FusedTrack = {
     ...fusedTracks[0],
     ...(currentDemoStep
@@ -636,10 +699,31 @@ function App() {
           <p>Operator dashboard demo</p>
         </div>
         <div className="header-badges">
-          <div className="data-mode">Data Mode: Local Ontology Mock</div>
+          <div className="data-mode">
+            Data Mode:{' '}
+            {dataMode === 'palantirSnapshot'
+              ? 'Palantir Ontology Snapshot + Local Fusion Demo'
+              : 'Local Ontology Mock'}
+          </div>
           <div className="system-status">
             <span />
             Demo feed live
+          </div>
+          <div className="source-controls" aria-label="Data source controls">
+            <button
+              className={dataMode === 'local' ? 'is-selected' : ''}
+              type="button"
+              onClick={() => setDataMode('local')}
+            >
+              Local Mock
+            </button>
+            <button
+              className={dataMode === 'palantirSnapshot' ? 'is-selected' : ''}
+              type="button"
+              onClick={() => setDataMode('palantirSnapshot')}
+            >
+              Palantir Snapshot
+            </button>
           </div>
           <div className="demo-controls" aria-label="Demo Mode controls">
             <button type="button" onClick={startDemo}>
@@ -662,9 +746,16 @@ function App() {
         </strong>
       </section>
 
+      <SnapshotExplanation dataMode={dataMode} usingFallbackData={usingFallbackData} />
+
       <div className="dashboard-grid">
         <SensorFeed demoStep={currentDemoStep} />
-        <TrackMap selectedTrack={selectedTrack} demoStep={currentDemoStep} />
+        <TrackMap
+          activePlatforms={activePlatforms}
+          activeSensors={activeSensors}
+          selectedTrack={selectedTrack}
+          demoStep={currentDemoStep}
+        />
         <SelectedFusedTrack
           actions={operatorActions}
           demoStep={currentDemoStep}
