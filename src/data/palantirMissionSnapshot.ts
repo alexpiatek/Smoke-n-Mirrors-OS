@@ -1,3 +1,5 @@
+import { evidenceAssets } from './evidenceAssets'
+
 export const palantirMissionDetections = [
   {
     detection_id: 'DET-SM-0001',
@@ -214,3 +216,5 @@ export const palantirMissionMetadata = {
   fallbackSnapshot: false,
   note: 'Palantir-backed synthetic mission scenario created for the SmokenMirrorsOS hackathon prototype.',
 }
+
+export const palantirMissionEvidenceAssets = evidenceAssets

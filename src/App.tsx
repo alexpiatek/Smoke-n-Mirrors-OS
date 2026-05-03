@@ -6,6 +6,13 @@ import { ontologySnapshotToUi } from './lib/dashboard/adapters/ontologyToUi'
 import { simulationToUi } from './lib/dashboard/adapters/simulationToUi'
 import { createScenarioEngine, type ScenarioEngine } from './lib/sim/scenarioEngine'
 import { scenarioOptions } from './lib/sim/scenarioDefinitions'
+import {
+  acousticEvidenceAssetForTrack,
+  eoirCompassFolderRid,
+  eoirEvidenceAssetsForTrack,
+  type EvidenceAudioAsset,
+  type EvidenceImageAsset,
+} from './data/evidenceAssets'
 import { getPalantirDemoScenario, palantirDemoDatasetMetadata } from './data/palantirDemoScenarios'
 import type {
   Detection,
@@ -63,6 +70,7 @@ type OperatorRecommendation = {
 
 type LiveIntelCard = {
   id: string
+  trackId: string
   modality: string
   label: string
   confidence: number
@@ -1135,6 +1143,7 @@ function buildLiveIntelCards(selectedTrack: FusedTrack, relatedDetections: Detec
   const evidenceCards =
     selectedTrack.evidence?.map((artifact) => ({
       id: artifact.artifact_id,
+      trackId: selectedTrack.track_id,
       modality: artifact.modality,
       label: artifact.label,
       confidence: artifact.confidence,
@@ -1143,6 +1152,7 @@ function buildLiveIntelCards(selectedTrack: FusedTrack, relatedDetections: Detec
     })) ?? []
   const detectionCards = relatedDetections.map((detection) => ({
     id: detection.detection_id,
+    trackId: selectedTrack.track_id,
     modality: detection.modality,
     label: detection.classification,
     confidence: detection.confidence,
@@ -1152,6 +1162,7 @@ function buildLiveIntelCards(selectedTrack: FusedTrack, relatedDetections: Detec
   const contributionCards =
     selectedTrack.fusion_contributions?.map((contribution) => ({
       id: `${selectedTrack.track_id}-${contribution.sensor_id}-${contribution.modality}`,
+      trackId: selectedTrack.track_id,
       modality: contribution.modality,
       label: `${modalityShortLabel(contribution.modality)} ${contributionStatusLabel(contribution.status).toLowerCase()}`,
       confidence: contribution.confidence,
@@ -1182,6 +1193,7 @@ function buildLiveIntelCards(selectedTrack: FusedTrack, relatedDetections: Detec
     return (
       matching ?? {
         id: `${selectedTrack.track_id}-${modality}-derived`,
+        trackId: selectedTrack.track_id,
         modality,
         label,
         confidence: defaultConfidence,
@@ -1192,34 +1204,171 @@ function buildLiveIntelCards(selectedTrack: FusedTrack, relatedDetections: Detec
   })
 }
 
-function playAcousticCue(evidenceId: string) {
-  const audioWindow = window as typeof window & { webkitAudioContext?: typeof AudioContext }
-  const AudioContextCtor = window.AudioContext ?? audioWindow.webkitAudioContext
+function localMediaExists(localPath: string) {
+  return fetch(localPath, { method: 'HEAD', cache: 'no-store' })
+    .then((response) => {
+      const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
+      return response.ok && !contentType.includes('text/html')
+    })
+    .catch(() => false)
+}
 
-  if (!AudioContextCtor) {
+let activeAcousticAudio: HTMLAudioElement | null = null
+let activeAcousticStopHandler: (() => void) | null = null
+let acousticStopVersion = 0
+
+function stopAcousticCue() {
+  acousticStopVersion += 1
+
+  if (!activeAcousticAudio) {
+    activeAcousticStopHandler = null
     return
   }
 
-  try {
-    const audioContext = new AudioContextCtor()
-    const oscillator = audioContext.createOscillator()
-    const gain = audioContext.createGain()
-    const cueBias = evidenceId.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0) % 90
+  const stopHandler = activeAcousticStopHandler
+  activeAcousticStopHandler = null
+  activeAcousticAudio.pause()
+  activeAcousticAudio.currentTime = 0
+  activeAcousticAudio = null
+  stopHandler?.()
+}
 
-    oscillator.type = 'sine'
-    oscillator.frequency.setValueAtTime(138 + cueBias, audioContext.currentTime)
-    oscillator.frequency.exponentialRampToValueAtTime(92 + cueBias / 2, audioContext.currentTime + 0.72)
-    gain.gain.setValueAtTime(0.0001, audioContext.currentTime)
-    gain.gain.exponentialRampToValueAtTime(0.045, audioContext.currentTime + 0.04)
-    gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.78)
-    oscillator.connect(gain)
-    gain.connect(audioContext.destination)
-    oscillator.start()
-    oscillator.stop(audioContext.currentTime + 0.82)
-    oscillator.addEventListener('ended', () => void audioContext.close())
-  } catch {
-    // Audio playback is optional evidence context; browser restrictions should not interrupt the demo.
+function playAcousticCue(asset: EvidenceAudioAsset | null, onStop?: () => void) {
+  if (!asset) {
+    return Promise.resolve(false)
   }
+
+  const requestStopVersion = acousticStopVersion
+
+  return localMediaExists(asset.localPath).then((exists) => {
+    if (!exists || requestStopVersion !== acousticStopVersion) {
+      return false
+    }
+
+    stopAcousticCue()
+    const audio = new Audio(asset.localPath)
+    activeAcousticAudio = audio
+    activeAcousticStopHandler = onStop ?? null
+    audio.addEventListener(
+      'ended',
+      () => {
+        if (activeAcousticAudio === audio) {
+          stopAcousticCue()
+        }
+      },
+      { once: true },
+    )
+    return audio
+      .play()
+      .then(() => true)
+      .catch(() => {
+        if (activeAcousticAudio === audio) {
+          stopAcousticCue()
+        }
+
+        return false
+      })
+  })
+}
+
+function EvidenceAudioButton({ asset }: { asset: EvidenceAudioAsset | null }) {
+  const [status, setStatus] = useState<'checking' | 'ready' | 'missing'>(asset ? 'checking' : 'missing')
+  const [playing, setPlaying] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!asset) {
+      setStatus('missing')
+      setPlaying(false)
+      return
+    }
+
+    setPlaying(false)
+    setStatus('checking')
+    localMediaExists(asset.localPath).then((exists) => {
+      if (!cancelled) {
+        setStatus(exists ? 'ready' : 'missing')
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [asset])
+
+  useEffect(() => stopAcousticCue, [])
+
+  const disabled = !asset || status !== 'ready'
+  const label =
+    status === 'checking'
+      ? 'Checking sound'
+      : status === 'ready'
+        ? playing
+          ? 'Stop drone sound'
+          : asset?.buttonLabel ?? 'Play sound'
+        : 'Sound pending export'
+
+  return (
+    <button
+      aria-pressed={playing}
+      className={`evidence-audio-button is-${status} ${playing ? 'is-playing' : ''}`}
+      disabled={disabled}
+      type="button"
+      onClick={() => {
+        if (playing) {
+          stopAcousticCue()
+          setPlaying(false)
+          return
+        }
+
+        playAcousticCue(asset, () => setPlaying(false)).then((started) => {
+          if (started) {
+            setPlaying(true)
+          }
+        })
+      }}
+    >
+      {label}
+    </button>
+  )
+}
+
+function EoirEvidenceCarousel({ assets }: { assets: EvidenceImageAsset[] }) {
+  const [imageStatus, setImageStatus] = useState<Record<string, 'loaded' | 'missing'>>({})
+
+  if (assets.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="eoir-carousel" aria-label="EO/IR evidence carousel">
+      <div className="eoir-carousel-strip">
+        {assets.map((asset, index) => {
+          const status = imageStatus[asset.assetId]
+
+          return (
+            <figure className={`eoir-frame is-${status ?? 'checking'}`} key={asset.assetId}>
+              <img
+                alt={`${asset.frameLabel} from Foundry EO/IR evidence`}
+                onError={() => setImageStatus((current) => ({ ...current, [asset.assetId]: 'missing' }))}
+                onLoad={() => setImageStatus((current) => ({ ...current, [asset.assetId]: 'loaded' }))}
+                src={asset.localPath}
+              />
+              {status !== 'loaded' ? (
+                <span>
+                  <strong>{String(index + 1).padStart(2, '0')}</strong>
+                  Media pending export
+                </span>
+              ) : null}
+              <figcaption>{asset.frameLabel}</figcaption>
+            </figure>
+          )
+        })}
+      </div>
+      <small>Compass folder {eoirCompassFolderRid}</small>
+    </div>
+  )
 }
 
 function contributionStatusLabel(status: string) {
@@ -3072,6 +3221,72 @@ function TrackQueueCard({
   )
 }
 
+function SensorEvidenceDetailCard({
+  group,
+  onDismiss,
+  track,
+}: {
+  group: SourceEvidenceGroup
+  onDismiss: () => void
+  track: FusedTrack
+}) {
+  const preview: SensorQuickLookPreview = {
+    sensorId: `${track.track_id}-${sourceGroupLabel(group)}`,
+    platformId: 'LOCAL-DEMO',
+    platformCallsign: 'Selected target evidence',
+    modality: sourceGroupLabel(group),
+    modalityGroup: group,
+    measurementKind: group === 'Radar' ? 'Demo radar plot' : group === 'EO' ? 'EO/IR visual cue' : 'Acoustic/RF signature',
+    status: group === 'EO' || group === 'Acoustic/RF' ? 'active' : track.custody_status,
+    timestamp: track.updated_at ?? track.last_seen,
+    confidence: track.confidence,
+    rangeM: track.distance_to_asset_m ?? null,
+    bearingDeg: track.heading_deg ?? null,
+    speedMps: track.speed_mps ?? null,
+    altitudeLabel: trackAltitudeLabel(track) ?? 'N/A',
+    trackId: track.track_id,
+    classification: track.classification ?? 'Sensor watch',
+    signalStrength: Math.round(Math.max(0.18, track.confidence) * 100),
+    coordinate: [track.estimated_lon, track.estimated_lat],
+    screenPoint: { x: 0, y: 0 },
+    mode: 'pinned',
+  }
+  const acousticAsset = group === 'Acoustic/RF' ? acousticEvidenceAssetForTrack(track.track_id, track.classification) : null
+  const notes =
+    group === 'EO'
+      ? ['Compass folder linked', 'EO/IR carousel uses local exported frames', 'No runtime Foundry fetch']
+      : group === 'Acoustic/RF'
+        ? ['MIO media set linked', 'Click play for drone acoustic evidence', 'No autoplay']
+        : ['Fused radar plot', 'Track confidence retained for operator review']
+
+  function closePreview() {
+    if (group === 'Acoustic/RF') {
+      stopAcousticCue()
+    }
+
+    onDismiss()
+  }
+
+  return (
+    <article className={`inline-evidence-popover ${sourceGroupClass(group)}`} onMouseLeave={group === 'Acoustic/RF' ? stopAcousticCue : undefined}>
+      <header>
+        <span>{track.track_id}</span>
+        <strong>{group === 'EO' ? 'EO/IR evidence carousel' : group === 'Acoustic/RF' ? 'Acoustic/RF drone sound' : 'Radar evidence'}</strong>
+        <button aria-label="Close evidence preview" type="button" onClick={closePreview}>
+          X
+        </button>
+      </header>
+      <SensorPreviewVisual preview={preview} />
+      <ul>
+        {notes.map((note) => (
+          <li key={note}>{note}</li>
+        ))}
+      </ul>
+      {group === 'Acoustic/RF' ? <EvidenceAudioButton asset={acousticAsset} /> : null}
+    </article>
+  )
+}
+
 function LeftTrackRail({
   detections: records,
   protectedAssets,
@@ -3092,6 +3307,7 @@ function LeftTrackRail({
   onSelectTrack: (trackId: string) => void
 }) {
   const [activeTab, setActiveTab] = useState<TargetVerificationTab>('verified')
+  const [evidencePreviewGroup, setEvidencePreviewGroup] = useState<SourceEvidenceGroup | null>(null)
   const queueItems = useMemo(
     () => buildTrackQueueItems({ detections: records, protectedAssets, scenario, tracks }),
     [protectedAssets, records, scenario, tracks],
@@ -3121,6 +3337,19 @@ function LeftTrackRail({
     { actionType: 'reacquire', label: 'Reacquire' },
     { actionType: 'dismiss', label: 'Dismiss' },
   ]
+
+  useEffect(() => {
+    stopAcousticCue()
+    setEvidencePreviewGroup(null)
+  }, [selectedTrack.track_id])
+
+  function setEvidencePreview(nextGroup: SourceEvidenceGroup | null) {
+    if (evidencePreviewGroup === 'Acoustic/RF' && nextGroup !== 'Acoustic/RF') {
+      stopAcousticCue()
+    }
+
+    setEvidencePreviewGroup(nextGroup)
+  }
 
   return (
     <aside className="left-rail simplified-monitoring" aria-labelledby="queue-title">
@@ -3174,13 +3403,28 @@ function LeftTrackRail({
           {evidenceGroups.map((group) => {
             const state = sensorEvidenceState(selectedTrack, records, group)
             return (
-              <div className={`sensor-evidence-pill ${sourceGroupClass(group)} is-${state}`} key={group}>
+              <button
+                className={`sensor-evidence-pill ${sourceGroupClass(group)} is-${state} ${evidencePreviewGroup === group ? 'is-selected' : ''}`}
+                key={group}
+                type="button"
+                onClick={() => setEvidencePreview(evidencePreviewGroup === group ? null : group)}
+                onFocus={() => setEvidencePreview(group)}
+                onMouseEnter={() => setEvidencePreview(group)}
+                onMouseLeave={group === 'Acoustic/RF' ? stopAcousticCue : undefined}
+              >
                 <strong>{sourceGroupLabel(group)}</strong>
                 <em>{state}</em>
-              </div>
+              </button>
             )
           })}
         </div>
+        {evidencePreviewGroup ? (
+          <SensorEvidenceDetailCard
+            group={evidencePreviewGroup}
+            track={selectedTrack}
+            onDismiss={() => setEvidencePreview(null)}
+          />
+        ) : null}
       </section>
 
       <section className="simple-action-panel" aria-label="Target actions">
@@ -3249,6 +3493,7 @@ function MissionMap({
   function dismissSensorPreview() {
     clearSensorPreviewTimers()
     pinnedSensorIdRef.current = null
+    stopAcousticCue()
     setSensorPreviewState(null)
   }
 
@@ -3334,7 +3579,10 @@ function MissionMap({
       window.clearTimeout(hoverCloseTimerRef.current)
     }
 
-    hoverCloseTimerRef.current = window.setTimeout(() => setSensorPreviewState(null), 180)
+    hoverCloseTimerRef.current = window.setTimeout(() => {
+      stopAcousticCue()
+      setSensorPreviewState(null)
+    }, 180)
   }
 
   function holdHoverPreviewOpen() {
@@ -3474,7 +3722,10 @@ function MissionMap({
           window.clearTimeout(hoverCloseTimerRef.current)
         }
 
-        hoverCloseTimerRef.current = window.setTimeout(() => setSensorPreviewState(null), 180)
+        hoverCloseTimerRef.current = window.setTimeout(() => {
+          stopAcousticCue()
+          setSensorPreviewState(null)
+        }, 180)
       }
     })
     const handleMapViewportChange = () => {
@@ -3498,7 +3749,10 @@ function MissionMap({
           hoverOpenTimerRef.current = null
         }
 
-        hoverCloseTimerRef.current = window.setTimeout(() => setSensorPreviewState(null), 180)
+        hoverCloseTimerRef.current = window.setTimeout(() => {
+          stopAcousticCue()
+          setSensorPreviewState(null)
+        }, 180)
       }
     })
 
@@ -3620,16 +3874,11 @@ function LiveIntelCardView({ card }: { card: LiveIntelCard }) {
   const normalized = normalizeModality(card.modality)
   const group = normalized.includes('RF') ? 'RF' : modalityGroup(card.modality)
   const acoustic = normalized.includes('ACOUSTIC')
+  const audioAsset = acoustic ? acousticEvidenceAssetForTrack(card.trackId, card.label) : null
 
   return (
-    <button
+    <article
       className={`live-intel-card ${modalityClass(card.modality)} ${normalized.includes('RF') ? 'rf' : ''} ${card.isNew ? 'is-new' : ''}`}
-      type="button"
-      onClick={() => {
-        if (acoustic) {
-          playAcousticCue(card.id)
-        }
-      }}
     >
       <span className="intel-thumb" aria-hidden="true">
         <i />
@@ -3641,8 +3890,8 @@ function LiveIntelCardView({ card }: { card: LiveIntelCard }) {
         <small>{formatConfidence(card.confidence)} / {formatTimestamp(card.timestamp)}</small>
         <em>{card.label}</em>
       </span>
-      {acoustic ? <span className="intel-play">Play</span> : null}
-    </button>
+      {acoustic ? <EvidenceAudioButton asset={audioAsset} /> : null}
+    </article>
   )
 }
 
@@ -4104,12 +4353,15 @@ function SensorPreviewVisual({ preview }: { preview: SensorQuickLookPreview }) {
   }
 
   if (preview.modalityGroup === 'EO') {
+    const eoirAssets = eoirEvidenceAssetsForTrack(preview.trackId, preview.classification)
+
     return (
-      <div className="sensor-preview-visual eoir" aria-hidden="true">
+      <div className="sensor-preview-visual eoir">
         <span className="video-noise" />
         <i className="target-box" />
         <b />
         <em>{preview.trackId ?? 'TRACK'}</em>
+        <EoirEvidenceCarousel assets={eoirAssets} />
       </div>
     )
   }
@@ -4152,6 +4404,7 @@ function SensorPreviewPopover({
   const rangeLabel = preview.rangeM ? formatDistanceMeters(preview.rangeM) : 'N/A'
   const bearingLabel = preview.bearingDeg !== null ? `${Math.round(preview.bearingDeg).toString().padStart(3, '0')} deg` : 'N/A'
   const signalLabel = `${Math.round(preview.signalStrength)}%`
+  const acousticAsset = preview.modalityGroup === 'Acoustic/RF' ? acousticEvidenceAssetForTrack(preview.trackId, preview.classification) : null
 
   return (
     <article
@@ -4238,9 +4491,7 @@ function SensorPreviewPopover({
         <span>{preview.platformCallsign}</span>
         <strong>{preview.measurementKind}</strong>
         {preview.modalityGroup === 'Acoustic/RF' ? (
-          <button type="button" onClick={() => playAcousticCue(preview.sensorId)}>
-            Play
-          </button>
+          <EvidenceAudioButton asset={acousticAsset} />
         ) : null}
       </footer>
     </article>
@@ -4500,6 +4751,16 @@ function App() {
           <span>Site <strong>{missionName}</strong></span>
           <span className={`alert-state risk-${riskLevel(selectedTrack.threat_score)}`}>Alert <strong>{alertState}</strong></span>
           <span>Mode <strong>{modeLabel}</strong></span>
+          <span className="offline-ontology-pill">
+            <svg aria-hidden="true" viewBox="0 0 32 32">
+              <path d="M9 11.5 16 7l7 4.5v9L16 25l-7-4.5z" />
+              <circle cx="9" cy="11.5" r="2.4" />
+              <circle cx="23" cy="11.5" r="2.4" />
+              <circle cx="16" cy="25" r="2.4" />
+              <circle cx="16" cy="7" r="2.4" />
+            </svg>
+            Offline <strong>Ontology operational</strong>
+          </span>
           <span>Time <strong>{formatTimestamp(selectedTrack.last_seen)}</strong></span>
         </div>
 
