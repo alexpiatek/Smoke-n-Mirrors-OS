@@ -1,5 +1,11 @@
 import { useMemo, useState } from 'react'
 import './App.css'
+import {
+  palantirMissionDetections,
+  palantirMissionFusedTracks,
+  palantirMissionMetadata,
+  palantirMissionOperatorActions,
+} from './data/palantirMissionSnapshot'
 import { palantirPlatforms, palantirSensors, palantirSnapshotMetadata } from './data/palantirSnapshot'
 
 type Platform = {
@@ -32,6 +38,9 @@ type Detection = {
   confidence: number
   classification: string
   contributes_to_track_id: string
+  is_stale?: boolean
+  stale_reason?: string
+  notes?: string
 }
 
 type FusedTrack = {
@@ -46,6 +55,8 @@ type FusedTrack = {
   source_summary: string
   recommended_next_action: string
   explanation: string
+  created_at?: string
+  updated_at?: string
 }
 
 type OperatorAction = {
@@ -54,6 +65,9 @@ type OperatorAction = {
   action_type: string
   label: string
   timestamp: string
+  operator_id?: string
+  notes?: string
+  resulting_status?: string
 }
 
 type DemoStep = {
@@ -69,7 +83,13 @@ type DemoStep = {
   emphasizeAction: boolean
 }
 
-type DataMode = 'local' | 'palantirSnapshot'
+type DataMode = 'local' | 'palantirSnapshot' | 'palantirMission'
+
+const dataModeLabels: Record<DataMode, string> = {
+  local: 'Local Ontology Mock',
+  palantirSnapshot: 'Palantir Ontology Snapshot + Local Fusion Demo',
+  palantirMission: 'Palantir Mission Data',
+}
 
 const localPlatforms: Platform[] = [
   {
@@ -297,6 +317,70 @@ const demoSteps: DemoStep[] = [
   },
 ]
 
+const palantirMissionDemoSteps: DemoStep[] = [
+  {
+    title: 'Palantir radar and RF detections seed the track.',
+    mapStatus: 'Palantir mission data: radar and RF seed TRK-SM-001.',
+    activeDetectionIds: ['DET-SM-0001', 'DET-SM-0002'],
+    staleDetectionIds: [],
+    custody_status: 'Building',
+    confidence: 0.58,
+    source_summary: 'Radar + RF',
+    recommended_next_action: 'Continue cross-sensor correlation.',
+    explanation: 'The Palantir branch snapshot starts with radar and RF evidence against the same fused track.',
+    emphasizeAction: false,
+  },
+  {
+    title: 'EO and radar cues strengthen custody.',
+    mapStatus: 'EO and follow-on radar detections agree with the fused track estimate.',
+    activeDetectionIds: ['DET-SM-0003', 'DET-SM-0004', 'DET-SM-0005'],
+    staleDetectionIds: [],
+    custody_status: 'Correlating',
+    confidence: 0.7,
+    source_summary: 'Radar + RF + EO',
+    recommended_next_action: 'Keep custody with independent modalities.',
+    explanation: 'The synthetic mission data links multiple sensor detections into the same Palantir FusedTrack.',
+    emphasizeAction: false,
+  },
+  {
+    title: 'IR becomes the strongest current custody cue.',
+    mapStatus: 'IR and RF detections improve confidence on TRK-SM-001.',
+    activeDetectionIds: ['DET-SM-0006', 'DET-SM-0007', 'DET-SM-0008'],
+    staleDetectionIds: [],
+    custody_status: 'Maintained',
+    confidence: 0.78,
+    source_summary: 'Radar + RF + EO + IR',
+    recommended_next_action: 'Maintain radar custody and prepare EO reacquire.',
+    explanation: 'The fused track reaches maintained custody with the IR detection as the strongest current cue.',
+    emphasizeAction: false,
+  },
+  {
+    title: 'Weak RF is retained as stale supporting context.',
+    mapStatus: 'One weak RF detection is stale while later RF still supports custody.',
+    activeDetectionIds: ['DET-SM-0010'],
+    staleDetectionIds: ['DET-SM-0009'],
+    custody_status: 'Maintained',
+    confidence: 0.74,
+    source_summary: 'Radar + RF + EO + IR, weak RF stale',
+    recommended_next_action: 'Do not drop track.',
+    explanation: 'The Palantir mission snapshot preserves stale context without letting it dominate the track state.',
+    emphasizeAction: false,
+  },
+  {
+    title: 'Operator action recommends EO reacquire.',
+    mapStatus: 'Palantir operator action history includes EO retask.',
+    activeDetectionIds: ['DET-SM-0004', 'DET-SM-0007', 'DET-SM-0010'],
+    staleDetectionIds: ['DET-SM-0009'],
+    custody_status: 'Maintained',
+    confidence: 0.78,
+    source_summary: 'Radar + RF + EO + IR',
+    recommended_next_action: 'Reacquire with EO and keep radar custody',
+    explanation:
+      'The Palantir-backed OperatorAction history matches the fused track recommendation and remains read-only in this app mode.',
+    emphasizeAction: true,
+  },
+]
+
 function groupDetectionsByModality(records: Detection[]) {
   return records.reduce<Record<string, Detection[]>>((groups, detection) => {
     groups[detection.modality] = [...(groups[detection.modality] ?? []), detection]
@@ -332,8 +416,8 @@ function createProjector(points: Array<{ lat: number; lon: number }>) {
   }
 }
 
-function SensorFeed({ demoStep }: { demoStep: DemoStep | null }) {
-  const groupedDetections = useMemo(() => groupDetectionsByModality(detections), [])
+function SensorFeed({ demoStep, records }: { demoStep: DemoStep | null; records: Detection[] }) {
+  const groupedDetections = useMemo(() => groupDetectionsByModality(records), [records])
 
   return (
     <section className="panel sensor-feed" aria-labelledby="sensor-feed-title">
@@ -404,11 +488,13 @@ function TrackMap({
   activeSensors,
   selectedTrack,
   demoStep,
+  readyStatus,
 }: {
   activePlatforms: Platform[]
   activeSensors: Sensor[]
   selectedTrack: FusedTrack
   demoStep: DemoStep | null
+  readyStatus: string
 }) {
   const projectPoint = createProjector([
     ...activePlatforms.map((platform) => ({ lat: platform.lat, lon: platform.lon })),
@@ -427,7 +513,7 @@ function TrackMap({
       </div>
 
       <div className="map-frame">
-        <svg viewBox="0 0 620 390" role="img" aria-label="Local ontology mock map">
+        <svg viewBox="0 0 620 390" role="img" aria-label="Mission data map">
           <defs>
             <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
               <path d="M 40 0 L 0 0 0 40" className="grid-line" />
@@ -446,7 +532,7 @@ function TrackMap({
 
           <g className="map-status">
             <rect x="34" y="74" width="392" height="36" rx="6" />
-            <text x="49" y="97">{demoStep?.mapStatus ?? 'Local ontology mock ready.'}</text>
+            <text x="49" y="97">{demoStep?.mapStatus ?? readyStatus}</text>
           </g>
 
           {activePlatforms.map((platform) => {
@@ -574,7 +660,7 @@ function SelectedFusedTrack({
   )
 }
 
-function Timeline({ demoStep }: { demoStep: DemoStep | null }) {
+function Timeline({ demoStep, records }: { demoStep: DemoStep | null; records: Detection[] }) {
   return (
     <section className="panel timeline-panel" aria-labelledby="timeline-title">
       <div className="panel-header">
@@ -583,7 +669,7 @@ function Timeline({ demoStep }: { demoStep: DemoStep | null }) {
       </div>
 
       <div className="timeline-events">
-        {detections.map((detection) => (
+        {records.map((detection) => (
           <article
             className={[
               'timeline-event',
@@ -617,38 +703,97 @@ function SnapshotExplanation({
   dataMode: DataMode
   usingFallbackData: boolean
 }) {
+  const metadata = dataMode === 'palantirMission' ? palantirMissionMetadata : palantirSnapshotMetadata
+
   return (
     <section className="snapshot-panel" aria-label="Palantir snapshot explanation">
       <div>
         <span>Ontology Snapshot</span>
         <strong>
-          {dataMode === 'palantirSnapshot'
-            ? 'Platforms and Sensors are read from Palantir. Detections and fused custody state are local demo objects mapped in PALANTIR_MAPPING.md.'
-            : 'Using local mock Platform and Sensor data. Palantir snapshot data is available for the snapshot mode.'}
+          {dataMode === 'palantirMission'
+            ? 'Mission objects are read from the Palantir branch snapshot. Operator buttons add local state only.'
+            : dataMode === 'palantirSnapshot'
+              ? 'Platforms and Sensors are read from Palantir. Detections and fused custody state are local demo objects mapped in PALANTIR_MAPPING.md.'
+              : 'Using local mock Platform and Sensor data. Palantir snapshot data is available for the snapshot mode.'}
         </strong>
       </div>
       <p>
-        {palantirSnapshotMetadata.ontologyName} / {palantirSnapshotMetadata.objectTypesUsed.length} object types /
-        fetched {palantirSnapshotMetadata.fetchedAt}
+        {metadata.ontologyName} / {metadata.objectTypesUsed.length} object types / fetched {metadata.fetchedAt}
         {usingFallbackData ? ' / snapshot empty, falling back to local mock data' : ''}
       </p>
     </section>
   )
 }
 
+function PalantirMissionProofCard() {
+  return (
+    <section className="mission-proof-card" aria-labelledby="mission-proof-title">
+      <div className="mission-proof-heading">
+        <span>Branch-backed mode</span>
+        <h2 id="mission-proof-title">Palantir Mission Data</h2>
+      </div>
+      <dl className="mission-proof-grid">
+        <div>
+          <dt>Proposal</dt>
+          <dd>{palantirMissionMetadata.proposalRid}</dd>
+        </div>
+        <div>
+          <dt>Branch</dt>
+          <dd>{palantirMissionMetadata.branchRid}</dd>
+        </div>
+        <div>
+          <dt>Detection</dt>
+          <dd>{palantirMissionMetadata.rowCounts.detections} rows</dd>
+        </div>
+        <div>
+          <dt>FusedTrack</dt>
+          <dd>{palantirMissionMetadata.rowCounts.fusedTracks} row</dd>
+        </div>
+        <div>
+          <dt>SmokenMirrorsOperatorAction</dt>
+          <dd>{palantirMissionMetadata.rowCounts.operatorActions} rows</dd>
+        </div>
+      </dl>
+      <div className="mission-proof-flags">
+        <span>Linked to existing ExampleSensors sensing layer</span>
+        <span>Local fallback available</span>
+      </div>
+    </section>
+  )
+}
+
 function App() {
-  const [operatorActions, setOperatorActions] = useState<OperatorAction[]>(initialActions)
+  const [localOperatorActions, setLocalOperatorActions] = useState<OperatorAction[]>([])
   const [demoStepIndex, setDemoStepIndex] = useState<number | null>(null)
   const [dataMode, setDataMode] = useState<DataMode>('palantirSnapshot')
-  const currentDemoStep = demoStepIndex === null ? null : demoSteps[demoStepIndex]
+  const activeDemoSteps = dataMode === 'palantirMission' ? palantirMissionDemoSteps : demoSteps
+  const currentDemoStep = demoStepIndex === null ? null : activeDemoSteps[demoStepIndex] ?? null
   const hasPalantirSnapshot = palantirPlatforms.length > 0 && palantirSensors.length > 0
+  const hasPalantirMissionData = palantirMissionDetections.length > 0 && palantirMissionFusedTracks.length > 0
+  const usesPalantirSensors = dataMode === 'palantirSnapshot' || dataMode === 'palantirMission'
   const activePlatforms: Platform[] =
-    dataMode === 'palantirSnapshot' && palantirPlatforms.length > 0 ? palantirPlatforms : localPlatforms
+    usesPalantirSensors && palantirPlatforms.length > 0 ? palantirPlatforms : localPlatforms
   const activeSensors: Sensor[] =
-    dataMode === 'palantirSnapshot' && palantirSensors.length > 0 ? palantirSensors : localSensors
-  const usingFallbackData = dataMode === 'palantirSnapshot' && !hasPalantirSnapshot
+    usesPalantirSensors && palantirSensors.length > 0 ? palantirSensors : localSensors
+  const activeDetections: Detection[] =
+    dataMode === 'palantirMission' && palantirMissionDetections.length > 0 ? palantirMissionDetections : detections
+  const activeFusedTracks: FusedTrack[] =
+    dataMode === 'palantirMission' && palantirMissionFusedTracks.length > 0 ? palantirMissionFusedTracks : fusedTracks
+  const baseOperatorActions: OperatorAction[] =
+    dataMode === 'palantirMission' && palantirMissionOperatorActions.length > 0
+      ? palantirMissionOperatorActions
+      : initialActions
+  const usingFallbackData =
+    (dataMode === 'palantirSnapshot' && !hasPalantirSnapshot) ||
+    (dataMode === 'palantirMission' && (!hasPalantirSnapshot || !hasPalantirMissionData))
+  const mapReadyStatus =
+    dataMode === 'palantirMission'
+      ? 'Palantir mission data ready.'
+      : dataMode === 'palantirSnapshot'
+        ? 'Palantir platform and sensor snapshot ready.'
+        : 'Local ontology mock ready.'
   const selectedTrack: FusedTrack = {
-    ...fusedTracks[0],
+    ...activeFusedTracks[0],
     ...(currentDemoStep
       ? {
           custody_status: currentDemoStep.custody_status,
@@ -659,18 +804,25 @@ function App() {
         }
       : {}),
   }
+  const operatorActions = [
+    ...baseOperatorActions,
+    ...localOperatorActions.filter((action) => action.track_id === selectedTrack.track_id),
+  ]
 
   function createOperatorAction(actionType: string, label: string) {
     const timestamp = new Date().toISOString().slice(11, 19) + 'Z'
-    const nextAction: OperatorAction = {
-      action_id: `ACT-${String(operatorActions.length + 1).padStart(4, '0')}`,
-      track_id: selectedTrack.track_id,
-      action_type: actionType,
-      label,
-      timestamp,
-    }
 
-    setOperatorActions((currentActions) => [...currentActions, nextAction])
+    setLocalOperatorActions((currentActions) => {
+      const nextAction: OperatorAction = {
+        action_id: `ACT-LOCAL-${String(currentActions.length + 1).padStart(4, '0')}`,
+        track_id: selectedTrack.track_id,
+        action_type: actionType,
+        label,
+        timestamp,
+      }
+
+      return [...currentActions, nextAction]
+    })
   }
 
   function startDemo() {
@@ -683,7 +835,7 @@ function App() {
         return 0
       }
 
-      return Math.min(currentIndex + 1, demoSteps.length - 1)
+      return Math.min(currentIndex + 1, activeDemoSteps.length - 1)
     })
   }
 
@@ -700,10 +852,7 @@ function App() {
         </div>
         <div className="header-badges">
           <div className="data-mode">
-            Data Mode:{' '}
-            {dataMode === 'palantirSnapshot'
-              ? 'Palantir Ontology Snapshot + Local Fusion Demo'
-              : 'Local Ontology Mock'}
+            Data Mode: {dataModeLabels[dataMode]}
           </div>
           <div className="system-status">
             <span />
@@ -723,6 +872,13 @@ function App() {
               onClick={() => setDataMode('palantirSnapshot')}
             >
               Palantir Snapshot
+            </button>
+            <button
+              className={dataMode === 'palantirMission' ? 'is-selected' : ''}
+              type="button"
+              onClick={() => setDataMode('palantirMission')}
+            >
+              Palantir Mission Data
             </button>
           </div>
           <div className="demo-controls" aria-label="Demo Mode controls">
@@ -748,11 +904,14 @@ function App() {
 
       <SnapshotExplanation dataMode={dataMode} usingFallbackData={usingFallbackData} />
 
+      {dataMode === 'palantirMission' ? <PalantirMissionProofCard /> : null}
+
       <div className="dashboard-grid">
-        <SensorFeed demoStep={currentDemoStep} />
+        <SensorFeed demoStep={currentDemoStep} records={activeDetections} />
         <TrackMap
           activePlatforms={activePlatforms}
           activeSensors={activeSensors}
+          readyStatus={mapReadyStatus}
           selectedTrack={selectedTrack}
           demoStep={currentDemoStep}
         />
@@ -762,7 +921,7 @@ function App() {
           selectedTrack={selectedTrack}
           onCreateAction={createOperatorAction}
         />
-        <Timeline demoStep={currentDemoStep} />
+        <Timeline demoStep={currentDemoStep} records={activeDetections} />
       </div>
     </main>
   )
