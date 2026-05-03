@@ -1,4 +1,4 @@
-export type SimulationScenarioKey = 'harborIntrusion' | 'falsePositiveClutter' | 'intermittentCustody'
+export type SimulationScenarioKey = 'singleDroneIntrusion' | 'droneSwarmPattern'
 
 export type SensorModality = 'RADAR' | 'RF' | 'ACOUSTIC' | 'EO' | 'IR'
 
@@ -61,7 +61,7 @@ export type SimulationProtectedAsset = SimulationPoint & {
   priority: 'critical' | 'high' | 'standard'
 }
 
-export type TrackBehavior = 'approach' | 'loiter' | 'transit' | 'outbound' | 'clutter' | 'intermittent'
+export type TrackBehavior = 'approach' | 'loiter' | 'transit' | 'outbound' | 'clutter' | 'intermittent' | 'swarm'
 
 export type SimulationTrackTemplate = {
   id: string

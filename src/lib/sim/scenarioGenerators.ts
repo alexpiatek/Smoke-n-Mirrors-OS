@@ -167,45 +167,29 @@ export function createDetectionForSensor({
 }
 
 function createHeroTrack(definition: SimulationScenarioDefinition): SimulationTrackTemplate {
-  if (definition.key === 'falsePositiveClutter') {
-    return {
-      id: definition.heroTrackId,
-      label: 'Bird-like clutter candidate',
-      classification: 'Suspected bird flock',
-      behavior: 'clutter',
-      start: destinationPoint(definition.center, 246, 1100),
-      headingDeg: 72,
-      speedMps: 5.4,
-      spawnSecond: 0,
-      retireSecond: definition.durationSeconds,
-      baseConfidence: 0.36,
-      baseThreat: 12,
-      sourceBias: { RADAR: 0.15, EO: -0.24, RF: -0.36, ACOUSTIC: -0.28, IR: -0.2 },
-      hero: true,
-    }
-  }
+  if (definition.key === 'droneSwarmPattern') {
+    const start = destinationPoint(definition.center, 255, 1900)
 
-  if (definition.key === 'intermittentCustody') {
     return {
       id: definition.heroTrackId,
-      label: 'Intermittent low-altitude UAV',
+      label: 'Lead converging UAV',
       classification: 'Probable UAV',
-      behavior: 'intermittent',
-      start: destinationPoint(definition.center, 238, 1750),
-      headingDeg: 48,
-      speedMps: 16.8,
+      behavior: 'swarm',
+      start,
+      headingDeg: bearingBetween(start, definition.center),
+      speedMps: 16.4,
       spawnSecond: 0,
       retireSecond: definition.durationSeconds,
-      baseConfidence: 0.61,
-      baseThreat: 54,
-      sourceBias: { RADAR: 0.06, RF: 0.16, EO: 0.02, ACOUSTIC: -0.08, IR: 0.08 },
+      baseConfidence: 0.7,
+      baseThreat: 68,
+      sourceBias: { RADAR: 0.12, RF: 0.18, EO: 0.08, ACOUSTIC: 0.04, IR: 0.08 },
       hero: true,
     }
   }
 
   return {
     id: definition.heroTrackId,
-    label: 'High-interest waterfront approach',
+    label: 'Single inbound UAV',
     classification: 'Probable UAV',
     behavior: 'approach',
     start: destinationPoint(definition.center, 232, 1850),
@@ -221,70 +205,55 @@ function createHeroTrack(definition: SimulationScenarioDefinition): SimulationTr
 }
 
 function createBackgroundTracks(definition: SimulationScenarioDefinition, rng: SeededRandom) {
-  const count = definition.key === 'falsePositiveClutter' ? 23 : 18
-  const classes = [
-    'Probable UAV',
-    'Suspected bird',
-    'Small surface contact',
-    'Outbound track',
-    'Friendly patrol',
-    'Low-risk harbor traffic',
-  ]
+  const count = definition.key === 'droneSwarmPattern' ? 7 : 2
   const tracks: SimulationTrackTemplate[] = []
+  const swarmVectors: Array<{
+    bearing: number
+    distanceM: number
+    behavior: SimulationTrackTemplate['behavior']
+    speedRange: [number, number]
+    spawnSecond: number
+    threatRange: [number, number]
+  }> = [
+    { bearing: 315, distanceM: 1900, behavior: 'approach', speedRange: [12, 15], spawnSecond: 0, threatRange: [54, 68] },
+    { bearing: 225, distanceM: 2200, behavior: 'swarm', speedRange: [12, 16], spawnSecond: 0, threatRange: [50, 65] },
+    { bearing: 0, distanceM: 1750, behavior: 'approach', speedRange: [10, 14], spawnSecond: 0, threatRange: [42, 58] },
+    { bearing: 45, distanceM: 1900, behavior: 'loiter', speedRange: [7, 10], spawnSecond: 0, threatRange: [34, 50] },
+    { bearing: 112, distanceM: 2100, behavior: 'approach', speedRange: [11, 15], spawnSecond: 0, threatRange: [46, 62] },
+    { bearing: 180, distanceM: 2400, behavior: 'swarm', speedRange: [13, 16], spawnSecond: 0, threatRange: [50, 66] },
+    { bearing: 270, distanceM: 2050, behavior: 'approach', speedRange: [10, 13], spawnSecond: 0, threatRange: [38, 54] },
+  ]
 
   for (let index = 0; index < count; index += 1) {
-    const classification = definition.key === 'falsePositiveClutter' ? weightedClutterClass(rng) : rng.pick(classes)
-    const friendly = classification.includes('Friendly') || classification.includes('Low-risk')
-    const bird = classification.includes('bird')
-    const surface = classification.includes('surface') || classification.includes('harbor')
-    const behavior = bird
-      ? 'clutter'
-      : classification.includes('Outbound')
-        ? 'outbound'
-        : surface
-          ? rng.pick(['transit', 'loiter'] as const)
-          : rng.pick(['approach', 'transit', 'loiter'] as const)
-    const startBearing = rng.between(0, 360)
-    const startDistance = rng.between(850, 3200)
-    const idPrefix = definition.key === 'falsePositiveClutter' ? 'TRK-FP' : definition.key === 'intermittentCustody' ? 'TRK-IC' : 'TRK-HB'
-    const headingTarget = behavior === 'outbound' ? bearingBetween(definition.center, destinationPoint(definition.center, startBearing, startDistance)) : rng.between(22, 118)
+    const swarm = definition.key === 'droneSwarmPattern'
+    const classification = swarm ? 'Probable UAV' : index === 0 ? 'Small surface contact' : 'Friendly patrol'
+    const friendly = classification.includes('Friendly')
+    const vector = swarm ? swarmVectors[index] : null
+    const behavior = vector?.behavior ?? (index === 0 ? 'approach' : 'transit')
+    const startBearing = vector ? vector.bearing + rng.between(-5, 5) : 280 + index * 30
+    const startDistance = vector ? vector.distanceM + rng.between(-90, 90) : rng.between(1650, 2450)
+    const start = destinationPoint(definition.center, startBearing, startDistance)
+    const idPrefix = swarm ? 'TRK-SW' : 'TRK-SD'
+    const headingTarget = swarm ? bearingBetween(start, definition.center) : index === 0 ? 72 : 102
 
     tracks.push({
       id: `${idPrefix}-${String(index + 2).padStart(3, '0')}`,
       label: classification,
       classification,
       behavior,
-      start: destinationPoint(definition.center, startBearing, startDistance),
+      start,
       headingDeg: headingTarget + rng.between(-18, 18),
-      speedMps: bird ? rng.between(4, 11) : surface ? rng.between(2, 7) : rng.between(6, 14),
-      spawnSecond: rng.int(0, definition.key === 'falsePositiveClutter' ? 40 : 75),
+      speedMps: vector ? rng.between(vector.speedRange[0], vector.speedRange[1]) : friendly ? rng.between(2, 5) : rng.between(5, 8),
+      spawnSecond: vector ? vector.spawnSecond : rng.int(80, 140),
       retireSecond: rng.int(320, definition.durationSeconds),
-      baseConfidence: bird ? rng.between(0.24, 0.5) : friendly ? rng.between(0.42, 0.62) : rng.between(0.43, 0.72),
-      baseThreat: bird ? rng.between(4, 20) : friendly ? rng.between(8, 26) : rng.between(24, 58),
+      baseConfidence: swarm ? rng.between(0.48, 0.72) : friendly ? rng.between(0.42, 0.56) : rng.between(0.44, 0.6),
+      baseThreat: vector ? rng.between(vector.threatRange[0], vector.threatRange[1]) : friendly ? rng.between(8, 22) : rng.between(18, 34),
       sourceBias: sourceBiasForClassification(classification, rng),
       friendly,
     })
   }
 
   return tracks
-}
-
-function weightedClutterClass(rng: SeededRandom) {
-  const roll = rng.next()
-
-  if (roll < 0.5) {
-    return 'Suspected bird'
-  }
-
-  if (roll < 0.68) {
-    return 'Low-confidence clutter'
-  }
-
-  if (roll < 0.84) {
-    return 'Friendly patrol'
-  }
-
-  return 'Small surface contact'
 }
 
 function sourceBiasForClassification(classification: string, rng: SeededRandom): Partial<Record<SensorModality, number>> {

@@ -85,6 +85,7 @@ export type FusedTrack = {
   speed_mps?: number
   distance_to_asset_m?: number
   eta_seconds_to_asset?: number
+  behavior_type?: string
   track_history?: TrackPoint[]
   probable_path?: TrackPoint[]
   fusion_contributions?: FusionContribution[]

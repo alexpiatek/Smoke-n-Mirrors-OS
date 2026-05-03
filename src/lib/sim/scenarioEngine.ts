@@ -508,6 +508,22 @@ export class ScenarioEngine {
       this.emitOnce(`${track.id}:action-recommended`, track, 'recommended_action_updated', 'Recommended action updated')
     }
 
+    if (phase.id === 'multiple-tracks-detected') {
+      this.emitOnce(`${track.id}:multiple-tracks`, track, 'multiple_tracks_detected', 'Multiple UAV tracks detected')
+    }
+
+    if (phase.id === 'swarm-pattern-suspected') {
+      this.emitOnce(`${track.id}:swarm-pattern`, track, 'swarm_pattern_suspected', 'Swarm pattern suspected')
+    }
+
+    if (phase.id === 'lead-threat-prioritized') {
+      this.emitOnce(`${track.id}:lead-prioritized`, track, 'threat_increased', 'Lead swarm track prioritized')
+    }
+
+    if (phase.id === 'simultaneous-boundary-crossing') {
+      this.emitOnce(`${track.id}:boundary-crossing`, track, 'entered_protected_zone', 'Simultaneous boundary crossing detected')
+    }
+
     if (phase.id === 'response-resolution') {
       this.emitOnce(`${track.id}:response-monitoring`, track, 'track_monitored', 'Track monitored under response workflow')
     }
